@@ -1,20 +1,45 @@
-import Pyro4, random, argparse, socket, threading, time
+import Pyro4, random, argparse, socket, threading, time, pickle, zmq, broker
 
-class node:
-    def __init__(self, pyroname, servername='chordServer'):
-        if servername is None: servername = 'chordServer'
-        self.pyroname = pyroname
-        self.servername = servername
-        self.server = Pyro4.Proxy(f'PYRONAME:{servername}')
+BUFERSIZE = 1024
 
-        self._nodeID = self.server.registerNode(pyroname)
-        self.NBits = self.server.NBits
+class Node:
+    def __init__(self, nameserver, role, nbits=30):
+        self.replication = 5
+
+        self.nameserver = nameserver
+        self.role = role
+
+        self.context = zmq.Context()
+        self.socket = self.context.socket(zmq.DEALER)
+        self.socket.setsockopt(zmq.RCVTIMEO, 1000)
+
+        self.NBits = nbits
         self.MAXNodes = (1 << self.NBits)
         self.FT = [self for _ in range(self.NBits + 1)]
 
+        self.data = {}
+
+    def set_pyro_name(self, pyroname):
+        self.pyroname = pyroname
+
     def start(self):
+        self.socket.connect(self.nameserver)
+        self.socket.send(pickle.dumps((broker.JOIN_GROUP, self.role, self.pyroname)))
+        try:
+            reply = pickle.loads(self.socket.recv())
+        except Exception as e:
+            raise Exception('server not responding')
+        self._nodeID = pickle.loads(reply)
+
         print(f'node {self.nodeID} started')
-        initialNode = self.server.getNode(self.nodeID)
+
+        self.socket.send(pickle.dumps((broker.RANDOM_NODE, self.role, self.nodeID)))
+        try:
+            reply = pickle.loads(self.socket.recv())
+        except Exception as e:
+            raise Exception('server not responding')
+        initialNode = pickle.loads(reply)
+        self.socket.close()
         self.join(initialNode)
 
     @Pyro4.expose
@@ -50,11 +75,13 @@ class node:
 
     def join(self, node):
         if node:
+            node = Pyro4.Proxy(node)
             print(f'node {self.nodeID} joining node {node.nodeID}')
             self.init_finger_table(node)
             self.update_others()
 
         threading.Thread(target=self.stabilize_daemon).start()
+        threading.Thread(target=self.replicate_daemon).start()
 
     def init_finger_table(self, node):
         print(f'node {self.nodeID} updating FT with node {node.nodeID}')
@@ -131,30 +158,48 @@ class node:
         i = random.randint(1, self.NBits)
         self.FT[i] = self.find_successor((self.nodeID + (1 << (i - 1))) % self.MAXNodes)
 
+    def save_data(self, key, value, replicated=False):
+        if not key in self.data.keys():
+            self.data[key] = (value, replicated)
+
+    def replicate_daemon(self):
+        while True:
+            cur = self.successor
+            for i in range(self.replication):
+                for j in self.data:
+                    if not j[1][1]:
+                        cur.save_data(j[0], j[1][0], True)
+                cur = cur.successor
+            time.sleep(len(self.data) / 10)
+
+    def get_data(self, key):
+        if not key in self.data.keys():
+            return None
+        return self.data[key]
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--servername', required=False, type=str, help='Pyro server name')
-    parser.add_argument('--pyroname', required=False, type=str, help='Pyro node name')
+    parser.add_argument('-ns', '--nameserver', required=True, type=str, help='Name server address')
+    parser.add_argument('-p', '--port', default=9999, required=False, type=int, help='Node port')
+    parser.add_argument('-r', '--role', default='chordNode', required=False, type=str, help='Node role')
     args = parser.parse_args()
 
-    servername, pyroname = None, None
-    if args.servername:
-        servername = args.servername
-    if args.pyroname:
-        pyroname = args.pyroname
-    else:
-        pyroname = 'name' + str(random.randint(1, 1000000000))
+    nameserver = args.nameserver
+    role = args.role
 
-    node = node(pyroname, servername)
+    host, port = nameserver.split(':')
+    port = int(port)
+    nameserver = (host, port)
+
+    node = Node(nameserver, role)
 
     hostname = socket.gethostname()
     host = socket.gethostbyname(hostname)
+    port = args.port
 
-    daemon = Pyro4.Daemon()
+    daemon = Pyro4.Daemon(host, port)
     uri = daemon.register(node)
-    ns = Pyro4.locateNS()
-    ns.register(node.pyroname, uri)
+    node.set_pyro_name(uri)
     threading.Thread(target=daemon.requestLoop).start()
-
     node.start()
