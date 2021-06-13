@@ -1,4 +1,4 @@
-import Pyro4, random, argparse, socket
+import random
 
 class chordConn:
     def __init__(self, role, key, proxy):
@@ -22,9 +22,13 @@ class Node:
         self.nodes.append(chordConn(role, id, pyroname))
         return id
 
-    def getRandomNode(self, role, exc=-1):
-        arr = [i.key for i in self.nodes if i.key != exc and i.role == role]
+    def addToGroup(self, id, role, pyroname):
+        self.nodes.append(chordConn(role, id, pyroname))
+
+    def getRandomNode(self, role, exc=None):
+        if exc is None: exc = []
+        arr = [i for i in self.nodes if not i.key in exc and i.role == role]
         if len(arr) == 0: return None
         r = random.choice(arr)
-        return r.proxy
+        return r
 

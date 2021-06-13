@@ -1,7 +1,6 @@
 import socket
 import pickle
 import threading
-import argparse
 import time
 import zmq
 import logging
@@ -24,6 +23,8 @@ COORDINATOR = 7
 ACK = 8
 PING = 9
 PONG = 10
+PULL = 11
+PUSH = 12
 
 WAIT_TIMEOUT = 5
 MESSAGE_TIMEOUT = 1000
@@ -40,30 +41,32 @@ class Conn:
 
 class Node:
 
-    def __init__(self, port, serveraddress=None):
+    def __init__(self, portin=5000, portout=5001, serveraddress=None):
         # My Address
-        self.port = port
         hostname = socket.gethostname()
         self.host = socket.gethostbyname(hostname)
 
         # Socket to listen requests from other nodes
         self.context = zmq.Context()
         self.lsock = self.context.socket(zmq.ROUTER)
-        self.listen_address = f'tcp://{self.host}:{self.port}'
+        self.listen_address = f'tcp://{self.host}:{portin}'
         self.lsock.bind(self.listen_address)
+        log.warning(f'socket binded to {self.listen_address}')
         self.lsock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
-        self.lsock.setsockopt(zmq.LINGER, 50000)
+        #self.lsock.setsockopt(zmq.LINGER, 50000)
 
         self.sem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
+        #self.ssock.bind(f'tcp://{self.host}:{portout}')
         self.ssock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
-        self.ssock.setsockopt(zmq.LINGER, 50000)
+        #self.ssock.setsockopt(zmq.LINGER, 50000)
 
         # Nodes Info
         self.leaderID = 0
         self.nodeID = 0
         self.connections = []
 
+        log.warning('starting flat server')
 
 
         if serveraddress:
@@ -74,7 +77,10 @@ class Node:
             self.leaderID = self.nodeID
 
         self.election_boolean = False
+
+        log.warning('listening for connections')
         threading.Thread(target=self.manageConnections).start()
+        log.warning('starting pinging daemon')
         threading.Thread(target=self.pingingDaemon).start()
 
     @property
@@ -146,8 +152,7 @@ class Node:
         while True:
             ident, data = self.lsocket_recv()
             if data is None: continue
-            code, *args = data
-            self.manageRequest(code, args)
+            self.manageRequest(ident, data)
 
     def manageRequest(self, ident, data):
         code, *args = data
@@ -191,15 +196,30 @@ class Node:
 
         if code == PING:
             log.warning(f'received ping request')
-            message = (PONG, self.leaderID)
+            message = (PONG, self.leaderID, len(self.connections))
             conn = self.getConnectionByID(args[0])
             if not conn is None:
                 conn.retransmits = 0
                 conn.active = True
             else:
-                self.connections.append(Conn(args[0], args[1]))
+                id, address = args
+                self.connections.append(Conn(address, id))
             self.lsocket_send(ident, message)
             log.warning(f'sended PONG response')
+
+        if code == PULL:
+            log.warning(f'received PULL request from {args[0]}')
+            msg = (ACK, self.connections)
+            conn = self.getConnectionByID(args[0])
+            self.ssocket_send(msg, conn.address)
+
+        if code == PUSH:
+            log.warning(f'received PUSH response')
+            arr = args[0]
+            for conn in arr:
+                temp = self.getConnectionByID(conn.nodeID)
+                if temp is None:
+                    self.connections.append(conn)
 
 
     # address is the listening address of the socket connecting
@@ -327,29 +347,38 @@ class Node:
                     conn.active = True
                     conn.retransmits = 0
                     log.warning(f'received PONG response')
-                    code, leaderID = reply
+                    code, leaderID, l = reply
+
+                    if l != len(self.connections):
+                        msg = (PULL, self.nodeID)
+                        reply = self.ssocket_send(msg, conn.address)
+
                     if leaderID != self.leaderID:
                         self.manageELECTION()
 
             time.sleep(len(self.connections))
 
-                
 
 def main():
     import argparse
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, required=True, help='Port to listen connections on the actual host')
-    parser.add_argument('--address', required=False, help='Address to connect.')
+    parser.add_argument('--portin', type=int, default=5000, required=False,
+                        help='Port for incoming communications on node')
+    parser.add_argument('--portout', type=int, default=5001, required=False,
+                        help='Port for outgoing communications on node')
+    parser.add_argument('--address', type=str, required=False,
+                        help='Address of node to connect to')
     args = parser.parse_args()
 
-    myport = args.port
+    port1 = args.portin
+    port2 = args.portout
     if args.address:
         host, port = args.address.split(':')
         address = (host, int(port))
-        node = Node(myport, address)
+        node = Node(port1, port2, address)
     else:
-        node = Node(myport)
+        node = Node(port1, port2)
 
 
 if __name__ == '__main__':
