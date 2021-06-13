@@ -1,9 +1,9 @@
 import random
 
 class chordConn:
-    def __init__(self, role, key, proxy):
+    def __init__(self, role, key, address):
         self.key = key
-        self.proxy = proxy
+        self.address = address
         self.role = role
 
 class Node:
@@ -13,17 +13,21 @@ class Node:
         self.MAXNodes = 1 << self.NBits
         self.nodes = []
 
-    def registerNode(self, role, pyroname):
+    def registerNode(self, role, address):
+        temp = [i for i in self.nodes if i.role == role and i.address == address]
+        if len(temp) != 0:
+            return temp[0].key
+
         arr = [i.key for i in self.nodes]
         while True:
             id = random.randint(0, self.MAXNodes - 1)
             if not id in arr: break
 
-        self.nodes.append(chordConn(role, id, pyroname))
+        self.nodes.append(chordConn(role, id, address))
         return id
 
-    def addToGroup(self, id, role, pyroname):
-        self.nodes.append(chordConn(role, id, pyroname))
+    def addToGroup(self, id, role, address):
+        self.nodes.append(chordConn(role, id, address))
 
     def getRandomNode(self, role, exc=None):
         if exc is None: exc = []

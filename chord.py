@@ -1,4 +1,3 @@
-import Pyro4
 import random
 import argparse
 import socket
@@ -12,124 +11,158 @@ import logging
 log = logging.Logger(name='chord node')
 logging.basicConfig(level=logging.DEBUG)
 
-BUFERSIZE = 1024
+PING = 1
+PONG = 2
+NODEID = 3
+SUCCESSOR = 4
+PREDECESSOR = 5
+NOTIFY = 6
+UPDATE_FT = 7
+LOOKUP = 8
+CPF = 9
+
+class conn:
+    def __init__(self, id, address):
+        self.nodeID = id
+        self.address = address
+
+    def __eq__(self, other):
+        return self.nodeID == other.nodeID \
+               and self.address == other.address
+
+    def __str__(self):
+        return str(self.nodeID)
+
+    def __repr__(self):
+        return self.__str__()
 
 class Node:
-    def __init__(self, nameserver, role, port=5001):
+    def __init__(self, dns, role, portin=5000, portout=5001):
         self.replication = 5
 
-        self.nameserver = nameserver
+        self.dns = dns
         self.role = role
-
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.DEALER)
         host = socket.gethostname()
         host = socket.gethostbyname(host)
-        self.socket.bind(f'tcp://{host}:{port}')
-        self.socket.setsockopt(zmq.RCVTIMEO, 5000)
 
-    def ssocket_send(self, msg, address):
-        msg = pickle.dumps(msg)
-        self.socket.connect(address)
-        self.socket.send(msg)
-        try:
-            reply = pickle.loads(self.socket.recv())
-        except Exception as e:
-            reply = None
-        self.socket.disconnect(address)
-        return reply
+        self.context = zmq.Context()
 
-    def start(self, pyroname):
-        self.pyroname = pyroname
+        self.lsock = self.context.socket(zmq.ROUTER)
+        self.listen_address = f'tcp://{host}:{portin}'
+        self.lsock.bind(self.listen_address)
+        #self.lsock.setsockopt(zmq.RCVTIMEO, 5000)
 
-        server = f'tcp://{nameserver[0]}:{nameserver[1]}'
-        self.socket.connect(server)
-        reply = self.ssocket_send((broker.JOIN_GROUP, self.role, self.pyroname), server)
+        self.sem = threading.Semaphore()
+        self.ssock = self.context.socket(zmq.DEALER)
+        self.ssock.bind(f'tcp://{host}:{portout}')
+        self.ssock.setsockopt(zmq.RCVTIMEO, 5000)
+
+        server = f'tcp://{self.dns[0]}:{self.dns[1]}'
+        reply = self.ssocket_send((broker.JOIN_GROUP, self.role, self.listen_address), server)
         if reply is None:
             raise Exception('server not responding')
-        self._nodeID = reply
-
-        reply = self.ssocket_send((broker.NBits, None), server)
-        if reply is None:
-            raise Exception('server not responding')
-        self.NBits = reply
+        self.nodeID, self.NBits = reply
         self.MAXNodes = (1 << self.NBits)
-        self.FT = [self for _ in range(self.NBits + 1)]
+        self.FT = [conn(self.nodeID, self.listen_address) for _ in range(self.NBits + 1)]
+        self.predecessor = None
 
-        log.warning(f'node {self._nodeID} started')
-        exceptions = [self._nodeID]
+        log.warning(f'node {self.nodeID} started')
+        exceptions = [self.nodeID]
         while True:
             reply = self.ssocket_send((broker.RANDOM_NODE, self.role, exceptions), server)
             if reply is None:
                 raise Exception('server not responding')
-            code, id, name = reply
-            if name is None: break
-            node = Pyro4.Proxy(name)
+            id, name = reply
+            if name is None:
+                log.warning('node starts alone')
+                break
             log.warning(f'joining node {id}')
-            try:
+
+            if self.ping(name):
+                node = conn(id, name)
                 self.join(node)
                 break
-            except Exception:
+            else:
                 exceptions.append(id)
-        self.socket.close()
 
         log.warning('starting daemons')
+        threading.Thread(target=self.manageConnections).start()
         threading.Thread(target=self.stabilize_daemon).start()
 
         self.successors = []
+        #threading.Thread(target=self.successors_daemon).start()
 
 
+    def lsocket_send(self, ident, msg):
+        msg = pickle.dumps(msg)
+        self.lsock.send_multipart([ident, msg])
 
-    @Pyro4.expose
+    def lsocket_recv(self):
+        try:
+            ident, reply = self.lsock.recv_multipart()
+            reply = pickle.loads(reply)
+        except Exception as e:
+            ident, reply = None, None
+
+        return ident, reply
+
+    def ssocket_send(self, msg, address):
+        msg = pickle.dumps(msg)
+        self.sem.acquire()
+        self.ssock.connect(address)
+        self.ssock.send(msg)
+        try:
+            reply = pickle.loads(self.ssock.recv())
+        except Exception as e:
+            reply = None
+        self.ssock.disconnect(address)
+        self.sem.release()
+        return reply
+
+    def ping(self, node):
+        if node == self.listen_address: return True
+        reply = self.ssocket_send((PING, None), node)
+        return not reply is None and reply == PONG
+
+    def _successor_(self, address):
+        if address == self.listen_address:
+            return self.successor
+        return self.ssocket_send((SUCCESSOR, None), address)
+
     @property
     def successor(self):
         node = self.FT[1]
-        try:
-            id = node.nodeID
-            return node
-        except Exception:
+        if node is None or not self.ping(node.address):
             try:
                 self.successors = self.successors[1:]
                 self.FT[1] = self.successors[0]
-            except Exception:
-                self.FT[1] = self
-            return self.successor
+            except Exception as e:
+                self.FT[1] = conn(self.nodeID, self.listen_address)
+        return self.FT[1]
 
-    @Pyro4.expose
     @successor.setter
     def successor(self, value):
         self.FT[1] = value
+        self.successors = [value]
 
-    @Pyro4.expose
+    def _predecessor_(self, address):
+        if address == self.listen_address:
+            return self.predecessor
+        return self.ssocket_send((PREDECESSOR, None), address)
+
     @property
     def predecessor(self):
-        node = self.FT[0]
-        try:
-            id = node.nodeID
-            return node
-        except Exception:
-            self.FT[0] = self.find_predecessor(self.nodeID)
-        return self.predecessor
+        return self.FT[0]
 
-    @Pyro4.expose
     @predecessor.setter
     def predecessor(self, value):
         self.FT[0] = value
 
-    @Pyro4.expose
-    @property
-    def nodeID(self):
-        return self._nodeID
+    def start(self, i):
+        return (self.nodeID + (1<<(i - 1))) % self.MAXNodes
 
     def finger(self, i):
-        node = self.FT[i]
-        try:
-            id = node.nodeID
-            return node
-        except Exception as e:
-            if i == 1: self.FT[i] = self.successor
-            else: self.FT[i] = self.find_successor((self.nodeID + (1 << (i - 1))) % self.MAXNodes)
-            return self.finger(i)
+        return self.FT[i]
 
 
     # Says if node id is in range [a,b)
@@ -138,94 +171,202 @@ class Node:
         if a < b: return id >= a and id < b
         return id >= a or id < b
 
+
+    def manageConnections(self):
+        while True:
+            ident, data = self.lsocket_recv()
+            if data is None: continue
+            self.manageRequest(ident, data)
+
+    def manageRequest(self, ident, data):
+        code, *args = data
+        if code == PING:
+            log.warning(f'received PING request')
+            self.lsocket_send(ident, PONG)
+
+        if code == NODEID:
+            log.warning(f'received NODEID request')
+            self.lsocket_send(ident, self.nodeID)
+
+        if code == SUCCESSOR:
+            log.warning(f'received SUCCESSOR request')
+            self.lsocket_send(ident, self.successor)
+
+        if code == PREDECESSOR:
+            log.warning(f'received PREDECESSOR request')
+            self.lsocket_send(ident, self.predecessor)
+
+        if code == NOTIFY:
+            conn = args[0]
+            log.warning(f'received NOTIFY request for node {conn}')
+            self.notify(conn)
+
+        if code == UPDATE_FT:
+            log.warning(f'received UPDATE_FT request')
+            conn, i = args
+            self.update_finger_table(conn, i)
+
+        if code == LOOKUP:
+            log.warning(f'received LOOKUP request')
+            conn = self.lookup(args[0])
+            self.lsocket_send(ident, conn)
+
+        if code == CPF:
+            log.warning(f'received CPF request')
+            conn = self.closest_preceding_finger(args[0])
+            self.lsocket_send(ident, conn)
+
+
     def join(self, node):
-        if node:
+        self.successor = self._lookup_(self.nodeID, node.address)
+
+        '''
+        if self.ping(node.address):
             log.warning(f'node {self.nodeID} joining node {node.nodeID}')
             self.init_finger_table(node)
             self.update_others()
+        else:
+            self.FT = [conn(self.nodeID, self.listen_address) for _ in range(self.NBits + 1)]
+        '''
 
+    '''
     def init_finger_table(self, node):
-        log.warning(f'node {self.nodeID} updating FT with node {node.nodeID}')
-        self.successor = node.find_successor((self.nodeID + 1) % self.MAXNodes)
-        self.predecessor = self.successor.predecessor
-        self.successor.predecessor = self
+        log.warning(f'node {self.nodeID} updating FT with node {node}')
+        self.successor = self._lookup_((self.nodeID + 1) % self.MAXNodes, node.address)
+        self.predecessor = self._predecessor_(self.successor.address)
+        self._notify_(conn(self.nodeID, self.listen_address), self.successor.address)
         for i in range(1, self.NBits):
-            if self.between(self.finger(i + 1).nodeID, self.nodeID, self.finger(i).nodeID):
-                self.FT[i + 1] = self.finger(i)
+            if self.between(self.start(i + 1), self.nodeID, self.finger(i).nodeID):
+                self.FT[i + 1] = self.FT[i]
             else:
-                self.FT[i + 1] = node.find_successor((self.nodeID + (1 << i)) % self.MAXNodes)
-        log.warning(f'FT[{self.nodeID}]={[i.nodeID for i in self.FT]}')
+                self.FT[i + 1] = self._lookup_(self.start(i + 1), node.address)
+        log.warning(f'FT[{self.nodeID}]={[i for i in self.FT]}')
 
 
     def update_others(self):
         for i in range(1, self.NBits + 1):
             p = self.find_predecessor((self.nodeID - (1 << (i - 1)) + self.MAXNodes) % self.MAXNodes)
-            if p.nodeID == self.nodeID: continue
-            log.warning(f'sending update FT from {self.nodeID} to {p.nodeID} for index {i}')
-            p.update_finger_table(self, i)
+            if p is None or p.nodeID == self.nodeID: continue
+            log.warning(f'sending update FT from {self.nodeID} to {p} for index {i}')
+            self._update_finger_table_(conn(self.nodeID, self.listen_address), i, p.address)
 
-    @Pyro4.expose
+    def _update_finger_table_(self, node, i, address):
+        if address == self.listen_address:
+            self.update_finger_table(node, i)
+        else:
+            self.ssocket_send((UPDATE_FT, node, i), address)
+
     def update_finger_table(self, node, i):
-        log.warning(f'received update FT from node {node.nodeID} for index {i}')
+        log.warning(f'received update FT from node {node} for index {i}')
         if self.between(node.nodeID, self.nodeID, self.finger(i).nodeID):
             self.FT[i] = node
-            log.warning(f'FT[{i}] is now {node.nodeID}')
+            log.warning(f'FT[{i}] is now {node}')
             p = self.predecessor
-            if p.nodeID in [self.nodeID, node.nodeID]:
+            if p is None or p.nodeID in [self.nodeID, node.nodeID]:
                 return
-            log.warning(f'updating FT of predecessor {p.nodeID}')
-            p.update_finger_table(node, i)
-            log.warning(f'updated FT[{self.nodeID}]= {[i.nodeID for i in self.FT]}')
+            log.warning(f'updating FT of predecessor {p}')
+            self._update_finger_table_(conn(node.nodeID, node.listen_address), i, p.address)
+            log.warning(f'updated FT[{self.nodeID}]= {[i for i in self.FT]}')
+    '''
 
-    @Pyro4.expose
-    def find_successor(self, id):
-        predecessor = self.find_predecessor(id)
-        log.warning(f'node {self.nodeID}: successor of {id} is {predecessor.successor.nodeID}')
-        return predecessor.successor
+    def _lookup_(self, id, address):
+        if address == self.listen_address:
+            return self.lookup(id)
+        return self.ssocket_send((LOOKUP, id), address)
+
+    def lookup(self, id):
+        log.warning(f'trying to find successor of {id}')
+        p = self.find_predecessor(id)
+        ret = self._successor_(p.address)
+        log.warning(f'node {self.nodeID}: successor of {id} is {ret}')
+        return ret
 
     def find_predecessor(self, id):
         log.warning(f'node {self.nodeID}: trying to find predecessor of {id}')
-        cur = self
-        while not self.between(id, cur.nodeID + 1, cur.successor.nodeID + 1):
-            log.warning(f'node {self.nodeID}: searching closest finger for {id} in node {cur.nodeID}')
-            cur = cur.closest_preceding_finger(id)
-        log.warning(f'node {self.nodeID}: predecessor of {id} is {cur.nodeID}')
+        cur = conn(self.nodeID, self.listen_address)
+        while True:
+            succ = self._successor_(cur.address)
+            if succ is None or self.between(id, cur.nodeID + 1, succ.nodeID + 1):
+                break
+            cur = self._closest_preceding_finger_(id, cur.address)
+        log.warning(f'node {self.nodeID}: predecessor of {id} is {cur}')
         return cur
 
-    @Pyro4.expose
+
+    def _closest_preceding_finger_(self, id, address):
+        if address == self.listen_address:
+            return self.closest_preceding_finger(id)
+        else:
+            return self.ssocket_send((CPF, id), address)
+
     def closest_preceding_finger(self, id):
+        log.warning(f'searching closest finger for {id}')
         for i in range(self.NBits, 0, -1):
-            if self.between(self.finger(i).nodeID, self.nodeID + 1, id):
-                return self.finger(i)
-        return self
+            f = self.finger(i)
+            if f is None: continue
+            if self.between(f.nodeID, self.nodeID + 1, id):
+                return f
+        return conn(self.nodeID, self.listen_address)
+
 
     def stabilize_daemon(self):
         while True:
-            time.sleep(3)
+            log.warning(f'FT[{self.nodeID}]={[i for i in self.FT]}')
+            time.sleep(1)
             self.stabilize()
-            self.fix_fingers()
+            self.fix_finger()
 
     def stabilize(self):
-        x = self.successor.predecessor
-        if self.between(x.nodeID, self.nodeID + 1, self.successor.nodeID):
-            self.FT[1] = x
-        self.successor.notify(self)
+        log.warning('stabilizing')
+        if self.successor is None: return
+        x = self._predecessor_(self.successor.address)
+        if not x is None and self.nodeID + 1 != self.successor.nodeID \
+                and self.between(x.nodeID, self.nodeID + 1, self.successor.nodeID):
+            log.warning(f'new successor is {x.nodeID}')
+            self.successor = x
+        self._notify_(conn(self.nodeID, self.listen_address), self.successor.address)
 
-    @Pyro4.expose
+
+    def _notify_(self, node, address):
+        if address == self.listen_address:
+            self.notify(node)
+        else:
+            log.warning(f'sending NOTIFY to {address}')
+            self.ssocket_send((NOTIFY, node), address)
+
     def notify(self, node):
-        if self.predecessor is None or self.between(node.nodeID,
+        p = self.predecessor
+        if p is None or not self.ping(p.address) or self.between(node.nodeID,
             self.predecessor.nodeID + 1, self.nodeID):
-            self.FT[0] = node
+            self.predecessor = node
 
-    def fix_fingers(self):
-        i = random.randint(1, self.NBits)
-        self.FT[i] = self.find_successor((self.nodeID + (1 << (i - 1))) % self.MAXNodes)
+    def fix_finger(self):
+        i = random.randint(2, self.NBits)
+        self.FT[i] = self.lookup(self.start(i))
+
+    def successors_daemon(self):
+        while True:
+            if len(self.successors) == 0: continue
+            if len(self.successors) < self.NBits:
+                node = self.successors[-1]
+                try:
+                    new = self._successor_(node.address)
+                    self.successors.append(new)
+                    log.warning(f'added {new} as successor')
+                except Exception:
+                    self.successors.pop()
+                    log.warning('deleted successor')
+                    continue
+            time.sleep(len(self.successors) + 1)
+
+
+
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ns', '--nameserver', required=True, type=str, help='Name server address')
-    parser.add_argument('--port1', default=5000, required=False, type=int, help='Pyro daemon port')
+    parser.add_argument('--port1', default=5000, required=False, type=int, help='Port for incoming communications')
     parser.add_argument('--port2', default=5001, required=False, type=int, help='Port for outgoing communications')
     parser.add_argument('-r', '--role', default='chordNode', required=False, type=str, help='Node role')
     args = parser.parse_args()
@@ -237,15 +378,7 @@ if __name__ == '__main__':
     port = int(port)
     nameserver = (host, port)
 
+    port1 = args.port1
     port2 = args.port2
 
-    node = Node(nameserver, role, port2)
-
-    hostname = socket.gethostname()
-    host = socket.gethostbyname(hostname)
-    port = args.port1
-
-    daemon = Pyro4.Daemon(host, port)
-    uri = daemon.register(node)
-    threading.Thread(target=daemon.requestLoop).start()
-    node.start(uri)
+    node = Node(nameserver, role, port1, port2)

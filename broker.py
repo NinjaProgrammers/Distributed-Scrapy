@@ -5,7 +5,6 @@ import logging
 log = logging.Logger(name='Flat Server')
 logging.basicConfig(level=logging.DEBUG)
 
-NBits = 100
 JOIN_GROUP = 101
 RANDOM_NODE = 102
 ADD_GROUP = 103
@@ -20,16 +19,11 @@ class Broker(chordServer.Node, FlatServer.Node):
         super().manageRequest(ident, data)
 
         code, *args = data
-        if code == NBits:
-            log.warning(f'received NBITS request')
-            msg = self.NBits
-            self.lsocket_send(ident, msg)
-
         if code == JOIN_GROUP:
             log.warning(f'received JOINGROUP request')
             role, name = args
             id = self.registerNode(role, name)
-            self.lsocket_send(ident, id)
+            self.lsocket_send(ident, (id, self.NBits))
             msg = (ADD_GROUP, id, role, name)
             self.broadcast(msg)
 
@@ -38,9 +32,9 @@ class Broker(chordServer.Node, FlatServer.Node):
             role, exceptions = args
             node = self.getRandomNode(role, exceptions)
             if node is None:
-                self.lsocket_send(ident, (FlatServer.ACK, None, None))
+                self.lsocket_send(ident, (None, None))
             else:
-                self.lsocket_send(ident, (FlatServer.ACK, node.key, node.proxy))
+                self.lsocket_send(ident, (node.key, node.address))
 
         if code == ADD_GROUP:
             id, role, name = args

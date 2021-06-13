@@ -138,15 +138,16 @@ class Node:
         while True:
             log.warning(f'sending JOIN request from {self.listen_address}')
             reply = self.ssocket_send(message, address)
-            if reply is None: continue
+            if reply is None:
+                if time.time() - btime > WAIT_TIMEOUT:
+                    raise Exception('cannot reach node')
+                continue
             code, *args = reply
 
             if code == ACK:
                 log.warning(f'received ACK reply')
                 break
 
-            if time.time() - btime > WAIT_TIMEOUT:
-                raise Exception('cannot reach node')
 
     def manageConnections(self):
         while True:
