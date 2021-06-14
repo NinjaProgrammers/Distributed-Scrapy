@@ -17,9 +17,8 @@ NODEID = 3
 SUCCESSOR = 4
 PREDECESSOR = 5
 NOTIFY = 6
-UPDATE_FT = 7
-LOOKUP = 8
-CPF = 9
+LOOKUP = 7
+CPF = 8
 
 class conn:
     def __init__(self, id, address):
@@ -36,6 +35,7 @@ class conn:
     def __repr__(self):
         return self.__str__()
 
+
 class Node:
     def __init__(self, dns, role, portin=5000, portout=5001):
         self.replication = 5
@@ -47,15 +47,17 @@ class Node:
 
         self.context = zmq.Context()
 
+        self.lsem = threading.Semaphore()
         self.lsock = self.context.socket(zmq.ROUTER)
         self.listen_address = f'tcp://{host}:{portin}'
         self.lsock.bind(self.listen_address)
         #self.lsock.setsockopt(zmq.RCVTIMEO, 5000)
 
-        self.sem = threading.Semaphore()
+        self.ssem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
         self.ssock.bind(f'tcp://{host}:{portout}')
-        self.ssock.setsockopt(zmq.RCVTIMEO, 5000)
+        recvtime = random.randint(1000, 5000)
+        self.ssock.setsockopt(zmq.RCVTIMEO, recvtime)
 
         server = f'tcp://{self.dns[0]}:{self.dns[1]}'
         reply = self.ssocket_send((broker.JOIN_GROUP, self.role, self.listen_address), server)
@@ -63,8 +65,12 @@ class Node:
             raise Exception('server not responding')
         self.nodeID, self.NBits = reply
         self.MAXNodes = (1 << self.NBits)
-        self.FT = [conn(self.nodeID, self.listen_address) for _ in range(self.NBits + 1)]
+        self.FTsem = threading.Semaphore()
+        self.FT = [self.conn for _ in range(self.NBits + 1)]
         self.predecessor = None
+
+        self.succsem = threading.Semaphore()
+        self.successors = []
 
         log.warning(f'node {self.nodeID} started')
         exceptions = [self.nodeID]
@@ -89,40 +95,51 @@ class Node:
         threading.Thread(target=self.manageConnections).start()
         threading.Thread(target=self.stabilize_daemon).start()
 
-        self.successors = []
+
         #threading.Thread(target=self.successors_daemon).start()
 
 
     def lsocket_send(self, ident, msg):
         msg = pickle.dumps(msg)
+        self.lsem.acquire()
         self.lsock.send_multipart([ident, msg])
+        self.lsem.release()
 
     def lsocket_recv(self):
+        self.lsem.acquire()
         try:
             ident, reply = self.lsock.recv_multipart()
             reply = pickle.loads(reply)
         except Exception as e:
             ident, reply = None, None
+        self.lsem.release()
 
         return ident, reply
 
-    def ssocket_send(self, msg, address):
+    def ssocket_send(self, msg, address, WaitForReply=True):
         msg = pickle.dumps(msg)
-        self.sem.acquire()
+        self.ssem.acquire()
         self.ssock.connect(address)
         self.ssock.send(msg)
-        try:
-            reply = pickle.loads(self.ssock.recv())
-        except Exception as e:
+        if WaitForReply:
+            try:
+                reply = pickle.loads(self.ssock.recv())
+            except Exception as e:
+                reply = None
+        else:
             reply = None
         self.ssock.disconnect(address)
-        self.sem.release()
+        self.ssem.release()
         return reply
 
     def ping(self, node):
         if node == self.listen_address: return True
-        reply = self.ssocket_send((PING, None), node)
-        return not reply is None and reply == PONG
+        for i in range(5):
+            reply = self.ssocket_send((PING, None), node)
+            if not reply is None and reply == PONG:
+                return  True
+            time.sleep(2)
+        return False
 
     def _successor_(self, address):
         if address == self.listen_address:
@@ -130,20 +147,34 @@ class Node:
         return self.ssocket_send((SUCCESSOR, None), address)
 
     @property
+    def conn(self):
+        return conn(self.nodeID, self.listen_address)
+
+    @property
     def successor(self):
         node = self.FT[1]
         if node is None or not self.ping(node.address):
-            try:
-                self.successors = self.successors[1:]
+            self.succsem.acquire()
+            if len(self.successors) > 0:
+                self.successors.pop(0)
+            self.succsem.release()
+            self.FTsem.acquire()
+            if len(self.successors) > 0:
                 self.FT[1] = self.successors[0]
-            except Exception as e:
-                self.FT[1] = conn(self.nodeID, self.listen_address)
+            else:
+                self.FT[1] = self.conn
+            self.FTsem.release()
+            return self.successor
         return self.FT[1]
 
     @successor.setter
     def successor(self, value):
+        self.FTsem.acquire()
         self.FT[1] = value
+        self.FTsem.release()
+        self.succsem.acquire()
         self.successors = [value]
+        self.succsem.release()
 
     def _predecessor_(self, address):
         if address == self.listen_address:
@@ -156,7 +187,9 @@ class Node:
 
     @predecessor.setter
     def predecessor(self, value):
+        self.FTsem.acquire()
         self.FT[0] = value
+        self.FTsem.release()
 
     def start(self, i):
         return (self.nodeID + (1<<(i - 1))) % self.MAXNodes
@@ -176,12 +209,14 @@ class Node:
         while True:
             ident, data = self.lsocket_recv()
             if data is None: continue
-            self.manageRequest(ident, data)
+
+            threading.Thread(target=self.manageRequest, args=(ident, data,)).start()
+            #self.manageRequest(ident, data)
 
     def manageRequest(self, ident, data):
         code, *args = data
         if code == PING:
-            log.warning(f'received PING request')
+            #log.warning(f'received PING request')
             self.lsocket_send(ident, PONG)
 
         if code == NODEID:
@@ -201,11 +236,6 @@ class Node:
             log.warning(f'received NOTIFY request for node {conn}')
             self.notify(conn)
 
-        if code == UPDATE_FT:
-            log.warning(f'received UPDATE_FT request')
-            conn, i = args
-            self.update_finger_table(conn, i)
-
         if code == LOOKUP:
             log.warning(f'received LOOKUP request')
             conn = self.lookup(args[0])
@@ -218,56 +248,13 @@ class Node:
 
 
     def join(self, node):
-        self.successor = self._lookup_(self.nodeID, node.address)
+        while True:
+            succ = self._lookup_(self.nodeID, node.address)
+            self.successor = succ
+            if not succ is None:
+                log.warning(f'successor is {succ.nodeID}')
+                break
 
-        '''
-        if self.ping(node.address):
-            log.warning(f'node {self.nodeID} joining node {node.nodeID}')
-            self.init_finger_table(node)
-            self.update_others()
-        else:
-            self.FT = [conn(self.nodeID, self.listen_address) for _ in range(self.NBits + 1)]
-        '''
-
-    '''
-    def init_finger_table(self, node):
-        log.warning(f'node {self.nodeID} updating FT with node {node}')
-        self.successor = self._lookup_((self.nodeID + 1) % self.MAXNodes, node.address)
-        self.predecessor = self._predecessor_(self.successor.address)
-        self._notify_(conn(self.nodeID, self.listen_address), self.successor.address)
-        for i in range(1, self.NBits):
-            if self.between(self.start(i + 1), self.nodeID, self.finger(i).nodeID):
-                self.FT[i + 1] = self.FT[i]
-            else:
-                self.FT[i + 1] = self._lookup_(self.start(i + 1), node.address)
-        log.warning(f'FT[{self.nodeID}]={[i for i in self.FT]}')
-
-
-    def update_others(self):
-        for i in range(1, self.NBits + 1):
-            p = self.find_predecessor((self.nodeID - (1 << (i - 1)) + self.MAXNodes) % self.MAXNodes)
-            if p is None or p.nodeID == self.nodeID: continue
-            log.warning(f'sending update FT from {self.nodeID} to {p} for index {i}')
-            self._update_finger_table_(conn(self.nodeID, self.listen_address), i, p.address)
-
-    def _update_finger_table_(self, node, i, address):
-        if address == self.listen_address:
-            self.update_finger_table(node, i)
-        else:
-            self.ssocket_send((UPDATE_FT, node, i), address)
-
-    def update_finger_table(self, node, i):
-        log.warning(f'received update FT from node {node} for index {i}')
-        if self.between(node.nodeID, self.nodeID, self.finger(i).nodeID):
-            self.FT[i] = node
-            log.warning(f'FT[{i}] is now {node}')
-            p = self.predecessor
-            if p is None or p.nodeID in [self.nodeID, node.nodeID]:
-                return
-            log.warning(f'updating FT of predecessor {p}')
-            self._update_finger_table_(conn(node.nodeID, node.listen_address), i, p.address)
-            log.warning(f'updated FT[{self.nodeID}]= {[i for i in self.FT]}')
-    '''
 
     def _lookup_(self, id, address):
         if address == self.listen_address:
@@ -283,7 +270,7 @@ class Node:
 
     def find_predecessor(self, id):
         log.warning(f'node {self.nodeID}: trying to find predecessor of {id}')
-        cur = conn(self.nodeID, self.listen_address)
+        cur = self.conn
         while True:
             succ = self._successor_(cur.address)
             if succ is None or self.between(id, cur.nodeID + 1, succ.nodeID + 1):
@@ -306,7 +293,7 @@ class Node:
             if f is None: continue
             if self.between(f.nodeID, self.nodeID + 1, id):
                 return f
-        return conn(self.nodeID, self.listen_address)
+        return self.conn
 
 
     def stabilize_daemon(self):
@@ -315,6 +302,7 @@ class Node:
             time.sleep(1)
             self.stabilize()
             self.fix_finger()
+            self.fix_successors()
 
     def stabilize(self):
         log.warning('stabilizing')
@@ -324,7 +312,7 @@ class Node:
                 and self.between(x.nodeID, self.nodeID + 1, self.successor.nodeID):
             log.warning(f'new successor is {x.nodeID}')
             self.successor = x
-        self._notify_(conn(self.nodeID, self.listen_address), self.successor.address)
+        self._notify_(self.conn, self.successor.address)
 
 
     def _notify_(self, node, address):
@@ -332,7 +320,7 @@ class Node:
             self.notify(node)
         else:
             log.warning(f'sending NOTIFY to {address}')
-            self.ssocket_send((NOTIFY, node), address)
+            self.ssocket_send((NOTIFY, node), address, False)
 
     def notify(self, node):
         p = self.predecessor
@@ -342,22 +330,27 @@ class Node:
 
     def fix_finger(self):
         i = random.randint(2, self.NBits)
+        self.FTsem.acquire()
         self.FT[i] = self.lookup(self.start(i))
+        self.FTsem.release()
 
-    def successors_daemon(self):
-        while True:
-            if len(self.successors) == 0: continue
-            if len(self.successors) < self.NBits:
-                node = self.successors[-1]
-                try:
-                    new = self._successor_(node.address)
-                    self.successors.append(new)
-                    log.warning(f'added {new} as successor')
-                except Exception:
-                    self.successors.pop()
-                    log.warning('deleted successor')
-                    continue
-            time.sleep(len(self.successors) + 1)
+    def fix_successors(self):
+        if len(self.successors) == 0: return
+        if len(self.successors) < self.NBits:
+            node = self.successors[-1]
+            if node is None or not self.ping(node.address):
+                self.succsem.acquire()
+                self.successors.pop()
+                self.succsem.release()
+                return
+            new = self._successor_(node.address)
+            if not new is None and not new in self.successors and new != self.conn:
+                self.succsem.acquire()
+                self.successors.append(new)
+                self.succsem.release()
+                log.warning(f'added {new} as successor')
+                log.warning(f'Successors: {[i for i in self.successors]}')
+        time.sleep(len(self.successors) + 1)
 
 
 
