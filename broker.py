@@ -120,9 +120,9 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
 
 
-class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
+class Broker(chordServer.node, FlatServer.Node, HTTPServer):
     def __init__(self, portin=5000, portout=5001, serveraddress=None, nbits=30, httpport=5002, handler=HTTPHandler):
-        chordServer.Node.__init__(self, nbits=nbits)
+        chordServer.node.__init__(self, nbits=nbits)
 
         host = socket.gethostname()
         host = socket.gethostbyname(host)
@@ -139,10 +139,10 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
         code, *args = data
         if code == JOIN_GROUP:
             log.warning(f'received JOINGROUP request')
-            role, name = args
-            id = self.registerNode(role, name)
+            role, address, udp_address = args
+            id = self.registerNode(role, address, udp_address)
             send_response((id, self.NBits))
-            msg = (ADD_GROUP, id, role, name)
+            msg = (ADD_GROUP, role, id, address, udp_address)
             self.broadcast(msg)
 
         if code == RANDOM_NODE:
@@ -150,13 +150,14 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
             role, exceptions = args
             node = self.getRandomNode(role, exceptions)
             if node is None:
-                send_response((None, None))
+                send_response((None, None, None))
             else:
-                send_response((node.key, node.address))
+                send_response((node.key, node.address, node.udp_address))
 
         if code == ADD_GROUP:
-            id, role, name = args
-            self.addToGroup(id, role, name)
+            role, id, address, udp_address = args
+            log.warning(f'received AdToGroup for {id}')
+            self.addToGroup(role, id, address, udp_address)
 
     def __scrap_urls__(self, url, domain, nivel):
         log.error("SCRAPPING....")
@@ -200,38 +201,41 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
 
 
     def __get_html_cache_nodes__(self, url):
-        arr = [i for i in self.nodes]
+        arr = [i for i in self.nodes if i.active]
         while len(arr) > 0:
             c = random.choice(arr)
             arr.remove(c)
+
             log.warning("Sending GET_URL" + url+ " to node:" + c.address)
             reply = self.ssocket_send((GET_URL, url), c.address)
+            if reply is None:
+                c.active = False
+                continue
             print("REPLY  received ")
             return reply
         return "Empty"
 
     def __save_html_cache__(self, url, html):
-        if len(self.nodes) == 0: return
+        arr = [i for i in self.nodes if i.active]
+        while len(arr) > 0:
+            c = random.choice(self.nodes)
+            arr.remove(c)
 
-        c = random.choice(self.nodes)
-        log.warning("Sending SAVE_HTML to node" + c.address )
-        self.ssocket_send((SAVE_URL, url, html), c.address)
+            log.warning("Sending SAVE_HTML to node" + c.address )
+            reply = self.ssocket_send((SAVE_URL, url, html), c.address)
+            if reply is None or reply != ACK:
+                c.active = False
+                continue
+            break
 
 
     def get_html(self, url, domain, depth):
         global answer
         answer.clear()
-        html = self.__get_html_cache_nodes__(url)
-        #print("HTML   " + html)
-        if html is None or html == "Empty":
-            log.warning("Scrapping URL" + url)
-            # Cache doesn't have the html
-            self.__scrap_urls__(url=url,domain=domain,nivel=depth)
-            return answer
-        else:
-            log.warning("Cache returned the HTML")
-            answer[url] = html
-            return answer
+        log.warning("Scrapping URL" + url)
+        self.__scrap_urls__(url=url, domain=domain, nivel=depth)
+        return answer
+
 
 
 

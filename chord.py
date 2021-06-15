@@ -14,9 +14,10 @@ logging.basicConfig(level=logging.DEBUG)
 THREADS = 5
 
 class conn:
-    def __init__(self, id, address):
+    def __init__(self, id, address, udp_address):
         self.nodeID = id
         self.address = address
+        self.udp_address = udp_address
 
     def __eq__(self, other):
         return not other is None and self.nodeID == other.nodeID \
@@ -30,7 +31,7 @@ class conn:
 
 
 class Node:
-    def __init__(self, dns, role, portin=5000, portout=5001):
+    def __init__(self, dns, role):
         self.replication = 5
 
         self.dns = dns
@@ -41,10 +42,10 @@ class Node:
         self.context = zmq.Context()
 
         self.lsock = self.context.socket(zmq.ROUTER)
-        self.listen_address = f'tcp://{host}:{portin}'
-        self.lsock.bind(self.listen_address)
+        port = self.lsock.bind_to_random_port(f'tcp://{host}')
+        self.listen_address = f'tcp://{host}:{port}'
 
-        self.worker_address = f'inproc://workers{portin}'
+        self.worker_address = f'inproc://workers{port}'
         self.wsock = self.context.socket(zmq.DEALER)
         self.wsock.bind(self.worker_address)
         for i in range(THREADS):
@@ -53,11 +54,18 @@ class Node:
 
         self.ssem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
-        self.ssock.bind(f'tcp://{host}:{portout}')
+        self.ssock.bind_to_random_port(f'tcp://{host}')
         self.ssock.setsockopt(zmq.RCVTIMEO, 10000)
 
+        self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sping.settimeout(1)
+        self.spong = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.spong.bind((host, 0))
+        self.udp_address = self.spong.getsockname()
+
+
         server = f'tcp://{self.dns[0]}:{self.dns[1]}'
-        reply = self.ssocket_send((JOIN_GROUP, self.role, self.listen_address), server)
+        reply = self.ssocket_send((JOIN_GROUP, self.role, self.listen_address, self.udp_address), server)
         if reply is None:
             raise Exception('server not responding')
         self.nodeID, self.NBits = reply
@@ -75,14 +83,14 @@ class Node:
             reply = self.ssocket_send((RANDOM_NODE, self.role, exceptions), server)
             if reply is None:
                 raise Exception('server not responding')
-            id, name = reply
+            id, name, udp_address = reply
             if name is None:
                 log.warning('node starts alone')
                 break
             log.warning(f'joining node {id}')
 
-            if self.ping(name):
-                node = conn(id, name)
+            if self.ping(udp_address):
+                node = conn(id, name, udp_address)
                 self.join(node)
                 break
             else:
@@ -92,8 +100,7 @@ class Node:
         threading.Thread(target=self.stabilize_daemon).start()
         threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
         #zmq.device(zmq.QUEUE, self.lsock, self.wsock)
-
-
+        threading.Thread(target=self.pong).start()
         threading.Thread(target=self.successors_daemon).start()
 
     def ssocket_send(self, msg, address, WaitForReply=True):
@@ -112,11 +119,30 @@ class Node:
         self.ssem.release()
         return reply
 
+    def pong(self):
+        while True:
+            msg, addr = self.spong.recvfrom(1024)
+            if not msg: continue
+            msg = pickle.loads(msg)
+            if msg == PING:
+                log.warning(f'received PING from {addr}')
+                reply = pickle.dumps(PONG)
+                self.spong.sendto(reply, addr)
 
     def ping(self, node):
+        log.warning(f'pinging {node}')
         if node == self.listen_address: return True
-        reply = self.ssocket_send((PING, None), node)
-        return not reply is None and reply == PONG
+        msg = pickle.dumps(PING)
+        for i in range(5):
+            self.sping.sendto(msg, node)
+            try:
+                reply, addr = self.sping.recvfrom(1024)
+            except socket.timeout:
+                continue
+            reply = pickle.loads(reply)
+            if reply == PONG: return True
+        log.warning(f'pinging returned False')
+        return False
 
     def worker(self, worker_address):
         sock = self.context.socket(zmq.ROUTER)
@@ -172,7 +198,7 @@ class Node:
 
     @property
     def conn(self):
-        return conn(self.nodeID, self.listen_address)
+        return conn(self.nodeID, self.listen_address, self.udp_address)
 
     def _successor_(self, address):
         if address == self.listen_address:
@@ -300,7 +326,7 @@ class Node:
 
     def notify(self, node):
         p = self.predecessor
-        if p is None or not self.ping(p.address) or self.between(node.nodeID,
+        if p is None or not self.ping(p.udp_address) or self.between(node.nodeID,
             self.predecessor.nodeID + 1, self.nodeID):
             self.predecessor = node
 
@@ -319,7 +345,7 @@ class Node:
     def fix_successors(self):
         if len(self.successors) == 0: return
         if len(self.successors) < self.NBits:
-            if not self.ping(self.successor.address):
+            if not self.ping(self.successor.udp_address):
                 self.succsem.acquire()
                 self.successors.pop(0)
                 self.succsem.release()
@@ -333,7 +359,7 @@ class Node:
                 return
 
             node = self.successors[-1]
-            if node is None or not self.ping(node.address):
+            if node is None or not self.ping(node.udp_address):
                 self.succsem.acquire()
                 self.successors.pop()
                 self.succsem.release()

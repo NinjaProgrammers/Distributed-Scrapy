@@ -31,10 +31,10 @@ class capsule:
 
 
 class CacheNode(Node):
-    def __init__(self, dns, role, portin=5000, portout=5001):
+    def __init__(self, dns, role):
         self.dsem = threading.Semaphore()
         self.data = {}
-        super().__init__(dns, role, portin, portout)
+        super().__init__(dns, role)
         threading.Thread(target=self.replicate_daemon).start()
 
     def hash_string(self, target: str):
@@ -61,10 +61,10 @@ class CacheNode(Node):
                 self.data[cap.key] = cap
                 print(self.data)
                 self.dsem.release()
-                response = "OK"
+                response = ACK
             else:
                 log.warning("Sending SAVE_URL to node: " + node.address)
-                self.ssocket_send((SAVE_URL, key, text), node.address, False)
+                response = self.ssocket_send((SAVE_URL, key, text), node.address)
 
         if code == GET_URL:
             key = args[0]
@@ -133,8 +133,8 @@ class CacheNode(Node):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ns', '--nameserver', required=True, type=str, help='Name server address')
-    parser.add_argument('--port1', default=5050, required=False, type=int, help='Port for incoming communications')
-    parser.add_argument('--port2', default=5051, required=False, type=int, help='Port for outgoing communications')
+    #parser.add_argument('--port1', default=5000, required=False, type=int, help='Port for incoming communications')
+    #parser.add_argument('--port2', default=5001, required=False, type=int, help='Port for outgoing communications')
     parser.add_argument('-r', '--role', default='chordNode', required=False, type=str, help='Node role')
     args = parser.parse_args()
 
@@ -145,7 +145,7 @@ if __name__ == '__main__':
     port = int(port)
     nameserver = (host, port)
 
-    port1 = args.port1
-    port2 = args.port2
+    #port1 = args.port1
+    #port2 = args.port2
 
-    node = CacheNode(nameserver, role, port1, port2)
+    node = CacheNode(nameserver, role)
