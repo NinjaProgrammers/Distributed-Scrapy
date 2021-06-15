@@ -5,26 +5,10 @@ import time
 import zmq
 import logging
 import random
+from constants import *
 
 log = logging.Logger(name='Flat Server')
 logging.basicConfig(level=logging.DEBUG)
-
-# Joining constants
-JOIN = 1
-NEW_NODE = 2
-ADD_NODE = 3
-ACCEPTED = 4
-REFUSED = 5
-
-# Election constants
-ELECTION = 6
-COORDINATOR = 7
-
-ACK = 8
-PING = 9
-PONG = 10
-PULL = 11
-PUSH = 12
 
 WAIT_TIMEOUT = 5
 MESSAGE_TIMEOUT = 1000
@@ -32,12 +16,14 @@ MESSAGE_TIMEOUT = 1000
 TRIES = 3
 RETRANSMITS = 5
 
+
 class Conn:
     def __init__(self, address, nodeID):
         self.nodeID = nodeID
         self.address = address
         self.retransmits = 0
         self.active = True
+
 
 class Node:
 
@@ -52,14 +38,14 @@ class Node:
         self.listen_address = f'tcp://{self.host}:{portin}'
         self.lsock.bind(self.listen_address)
         log.warning(f'socket binded to {self.listen_address}')
-        self.lsock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
-        #self.lsock.setsockopt(zmq.LINGER, 50000)
+        #self.lsock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
+        # self.lsock.setsockopt(zmq.LINGER, 50000)
 
         self.sem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
-        #self.ssock.bind(f'tcp://{self.host}:{portout}')
+        self.ssock.bind(f'tcp://{self.host}:{portout}')
         self.ssock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
-        #self.ssock.setsockopt(zmq.LINGER, 50000)
+        # self.ssock.setsockopt(zmq.LINGER, 50000)
 
         # Nodes Info
         self.leaderID = 0
@@ -67,7 +53,6 @@ class Node:
         self.connections = []
 
         log.warning('starting flat server')
-
 
         if serveraddress:
             address = f'tcp://{serveraddress[0]}:{serveraddress[1]}'
@@ -81,7 +66,7 @@ class Node:
         log.warning('listening for connections')
         threading.Thread(target=self.manageConnections).start()
         log.warning('starting pinging daemon')
-        threading.Thread(target=self.pingingDaemon).start()
+        #threading.Thread(target=self.pingingDaemon).start()
 
     @property
     def leader(self):
@@ -107,28 +92,26 @@ class Node:
         try:
             reply = pickle.loads(self.ssock.recv())
         except Exception as e:
+            log.error("TIMEOUT ERROR")
             reply = None
         self.ssock.disconnect(address)
         self.sem.release()
 
         return reply
 
-
     def lsocket_recv(self):
         try:
             ident, reply = self.lsock.recv_multipart()
             reply = pickle.loads(reply)
         except Exception as e:
-            #print(e)
+            # print(e)
             ident, reply = None, None
 
         return ident, reply
 
-
     def lsocket_send(self, ident, msg=(ACK, None)):
         msg = pickle.dumps(msg)
         self.lsock.send_multipart([ident, msg])
-
 
     def join(self, address):
         # message to join a group
@@ -147,7 +130,6 @@ class Node:
             if code == ACK:
                 log.warning(f'received ACK reply')
                 break
-
 
     def manageConnections(self):
         while True:
@@ -180,7 +162,7 @@ class Node:
 
         if code == ELECTION:
             log.warning(f'received ELECTION request from node {args[0]}')
-            msg = (ACK, )
+            msg = (ACK,)
             self.lsocket_send(ident, msg)
             self.manageELECTION()
 
@@ -222,10 +204,9 @@ class Node:
                 if temp is None:
                     self.connections.append(conn)
 
-
     # address is the listening address of the socket connecting
     def manageJOIN(self, address):
-        #I am the coordinator
+        # I am the coordinator
         if self.leaderID == self.nodeID:
             self.manageNEW_NODE(address)
             return
@@ -257,8 +238,10 @@ class Node:
             return
 
         conn = self.getConnectionByAddress(address)
-        if conn is None: self.connections.append(Conn(address, newID))
-        else: return
+        if conn is None:
+            self.connections.append(Conn(address, newID))
+        else:
+            return
 
         log.warning(f'sending ACCEPTED request to {address}')
         msg = (ACCEPTED, newID, self.connections, self.nodeID)
@@ -269,16 +252,14 @@ class Node:
 
         log.warning(f"New node received {newID}")
 
-
     def broadcast(self, msg, exc=None):
         if exc is None: exc = []
         exc.append(self.listen_address)
-        
+
         for conn in self.connections:
             if not conn.address in exc:
                 log.warning(f'broadcast {msg} to {conn.address}')
                 self.ssocket_send(msg, conn.address)
-
 
     def manageELECTION(self):
         '''
@@ -312,12 +293,13 @@ class Node:
         reply = self.ssocket_send(msg, conn.address)
         return reply
 
+    '''
     def pingingDaemon(self):
         self.btime = time.time()
         while True:
             seq = [i for i in self.connections if i.nodeID != self.nodeID and i.active]
             if len(self.connections) > 1 and len(seq) == 0:
-                log.warning(f'node is isolated')
+                log.warning(f'Node is isolated')
 
                 reconnect = False
                 for i in range(TRIES):
@@ -331,7 +313,7 @@ class Node:
                             break
                     if reconnect: break
                 if not reconnect:
-                    raise Exception('conection has been lost')
+                    continue
 
             if len(seq) != 0:
                 conn = random.choice(seq)
@@ -357,8 +339,8 @@ class Node:
                     if leaderID != self.leaderID:
                         self.manageELECTION()
 
-            time.sleep(len(self.connections))
-
+            time.sleep(len(self.connections) * 5)
+    '''
 
 def main():
     import argparse
