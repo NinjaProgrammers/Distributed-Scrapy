@@ -10,12 +10,13 @@ log = logging.Logger(name='Cache')
 logging.basicConfig(level=logging.DEBUG)
 
 class capsule:
-    def __init__(self, key, data):
+    def __init__(self, key, hash, data):
         self.key = key
         self.data = data
+        self.hash = hash
 
     def __hash__(self):
-        return hash(self.key)
+        return self.hash
 
     def __eq__(self, other):
         return self.key == other.key
@@ -28,13 +29,13 @@ class CacheNode(Node):
         self.data = {}
         super().__init__(dns, role, portin, portout)
 
-    def manageRequest(self, ident, data):
-        super().manageRequest(ident, data)
+    def manage_request(self, data):
+        response = super().manage_request(data)
 
         code, *args = data
         if code == SAVE_URL:
-            key, text = args
-            cap = capsule(key, text)
+            key, hash, text = args
+            cap = capsule(key, hash, text)
             log.warning("Save url request for:" + cap.key)
             node = self.lookup(cap.__hash__() % self.MAXNodes)
             if node == self.conn:
@@ -43,15 +44,16 @@ class CacheNode(Node):
                 self.data[cap.key] = cap
                 print(self.data)
                 self.dsem.release()
-                self.lsocket_send(ident, "OK")
+                response = "OK"
             else:
                 log.warning("Sending SAVE_URL to node: " + node.address)
-                self.ssocket_send((SAVE_URL, key, text), node.address, False)
+                self.ssocket_send((SAVE_URL, key, hash, text), node.address, False)
 
         if code == GET_URL:
-            key = args[0]
+            key, hash = args
             log.warning("GET url request for:" + key)
-            node = self.lookup(hash(key) % self.MAXNodes)
+
+            node = self.lookup(hash % self.MAXNodes)
             if node == self.conn:
                 log.warning("I'm in charge of the url: " + key)
                 self.dsem.acquire()
@@ -66,10 +68,11 @@ class CacheNode(Node):
                     text = 'Empty'
                 self.dsem.release()
             else:
-                log.warning("Sending GET_URL to node: " + node.address)
-                text = self.ssocket_send((GET_URL, key), node.address)
+                log.warning(f"Sending GET_URL {key}   H: {hash % self.MAXNodes} to node: {node.address}")
+                text = self.ssocket_send((GET_URL, key, hash), node.address)
             #log.warning("SENDING URL" + text[0:4])
-            self.lsocket_send(ident,text)
+            response = text
+        return response
 
     def replicate_daemon(self):
         while True:

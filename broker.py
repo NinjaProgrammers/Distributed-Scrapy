@@ -10,6 +10,8 @@ import urllib.request
 from html.parser import HTMLParser
 from urllib.request import HTTPError, URLError
 from constants import *
+import threading
+
 
 log = logging.Logger(name='Flat Server')
 logging.basicConfig(level=logging.DEBUG)
@@ -120,7 +122,6 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
 class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
     def __init__(self, portin=5000, portout=5001, serveraddress=None, nbits=30, httpport=5002, handler=HTTPHandler):
-        FlatServer.Node.__init__(self, portin=portin, portout=portout, serveraddress=serveraddress)
         chordServer.Node.__init__(self, nbits=nbits)
 
         host = socket.gethostname()
@@ -128,16 +129,19 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
         address = (host,  httpport)
         log.warning(f'Running HTTP server in http://{host}:{httpport}')
         HTTPServer.__init__(self, address, handler)
+        threading.Thread(target=self.serve_forever).start()
+        FlatServer.Node.__init__(self, portin=portin, portout=portout, serveraddress=serveraddress)
 
-    def manageRequest(self, ident, data):
-        super().manageRequest(ident, data)
+
+    def manage_request(self, send_response, data):
+        super().manage_request(send_response,data)
 
         code, *args = data
         if code == JOIN_GROUP:
             log.warning(f'received JOINGROUP request')
             role, name = args
             id = self.registerNode(role, name)
-            self.lsocket_send(ident, (id, self.NBits))
+            send_response((id, self.NBits))
             msg = (ADD_GROUP, id, role, name)
             self.broadcast(msg)
 
@@ -146,9 +150,9 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
             role, exceptions = args
             node = self.getRandomNode(role, exceptions)
             if node is None:
-                self.lsocket_send(ident, (None, None))
+                send_response((None, None))
             else:
-                self.lsocket_send(ident, (node.key, node.address))
+                send_response((node.key, node.address))
 
         if code == ADD_GROUP:
             id, role, name = args
@@ -201,7 +205,7 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
             c = random.choice(arr)
             arr.remove(c)
             log.warning("Sending GET_URL" + url+ " to node:" + c.address)
-            reply = self.ssocket_send((GET_URL, url), c.address)
+            reply = self.ssocket_send((GET_URL, url, hash(url)), c.address)
             print("REPLY  received ")
             return reply
         return "Empty"
@@ -211,7 +215,7 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
 
         c = random.choice(self.nodes)
         log.warning("Sending SAVE_HTML to node" + c.address )
-        self.ssocket_send((SAVE_URL, url, html), c.address)
+        self.ssocket_send((SAVE_URL, url, hash(url), html), c.address)
 
 
     def get_html(self, url, domain, depth):

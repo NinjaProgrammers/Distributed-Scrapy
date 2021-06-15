@@ -11,7 +11,7 @@ from constants import *
 log = logging.Logger(name='chord node')
 logging.basicConfig(level=logging.DEBUG)
 
-
+THREADS = 5
 
 class conn:
     def __init__(self, id, address):
@@ -40,11 +40,16 @@ class Node:
 
         self.context = zmq.Context()
 
-        self.lsem = threading.Semaphore()
         self.lsock = self.context.socket(zmq.ROUTER)
         self.listen_address = f'tcp://{host}:{portin}'
         self.lsock.bind(self.listen_address)
-        #self.lsock.setsockopt(zmq.RCVTIMEO, 5000)
+
+        self.worker_address = f'inproc://workers{portin}'
+        self.wsock = self.context.socket(zmq.DEALER)
+        self.wsock.bind(self.worker_address)
+        for i in range(THREADS):
+            threading.Thread(target=self.worker, args=(self.worker_address,)).start()
+
 
         self.ssem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
@@ -84,30 +89,12 @@ class Node:
                 exceptions.append(id)
 
         log.warning('starting daemons')
-        #threading.Thread(target=self.manageConnections).start()
         threading.Thread(target=self.stabilize_daemon).start()
-        self.manageConnections()
+
+        zmq.device(zmq.QUEUE, self.lsock, self.wsock)
 
 
         #threading.Thread(target=self.successors_daemon).start()
-
-
-    def lsocket_send(self, ident, msg):
-        msg = pickle.dumps(msg)
-        self.lsem.acquire()
-        self.lsock.send_multipart([ident, msg])
-        self.lsem.release()
-
-    def lsocket_recv(self):
-        self.lsem.acquire()
-        try:
-            ident, reply = self.lsock.recv_multipart(flags=zmq.NOBLOCK)
-            reply = pickle.loads(reply)
-        except Exception as e:
-            ident, reply = None, None
-        self.lsem.release()
-
-        return ident, reply
 
     def ssocket_send(self, msg, address, WaitForReply=True):
         msg = pickle.dumps(msg)
@@ -130,6 +117,58 @@ class Node:
         if node == self.listen_address: return True
         reply = self.ssocket_send((PING, None), node)
         return not reply is None and reply == PONG
+
+    def worker(self, worker_address):
+        sock = self.context.socket(zmq.ROUTER)
+        sock.connect(worker_address)
+
+        while True:
+            ident1, ident2, data = sock.recv_multipart()
+
+            data = pickle.loads(data)
+            response = self.manage_request(data)
+
+            bits = pickle.dumps(response)
+            sock.send_multipart([ident1, ident2, bits])
+
+    def manage_request(self, data):
+        code, *args = data
+        response = None
+        if code == PING:
+            # log.warning(f'received PING request')
+            response = PONG
+
+        if code == NODEID:
+            log.warning(f'received NODEID request')
+            response = self.nodeID
+
+        if code == SUCCESSOR:
+            log.warning(f'received SUCCESSOR request')
+            response = self.successor
+
+        if code == PREDECESSOR:
+            log.warning(f'received PREDECESSOR request')
+            response = self.predecessor
+
+        if code == NOTIFY:
+            conn = args[0]
+            log.warning(f'received NOTIFY request for node {conn}')
+            self.notify(conn)
+
+        if code == LOOKUP:
+            log.warning(f'received LOOKUP request')
+            conn = self.lookup(args[0])
+            response = conn
+
+        if code == FIND_PREDECESSOR:
+            log.warning(f'received FIND_PREDECESSOR request')
+            conn = self.find_predecessor(args[0])
+            log.warning(f'predecessor of {args[0]} is {conn}')
+            response = conn
+
+        return response
+
+
 
     @property
     def conn(self):
@@ -195,49 +234,6 @@ class Node:
         #log.warning(f'node {self.nodeID}: asked if {a}<={id}<{b}')
         if a < b: return id >= a and id < b
         return id >= a or id < b
-
-
-    def manageConnections(self):
-        while True:
-            ident, data = self.lsocket_recv()
-            if data is None: continue
-
-            #threading.Thread(target=self.manageRequest, args=(ident, data,)).start()
-            self.manageRequest(ident, data)
-
-    def manageRequest(self, ident, data):
-        code, *args = data
-        if code == PING:
-            #log.warning(f'received PING request')
-            self.lsocket_send(ident, PONG)
-
-        if code == NODEID:
-            log.warning(f'received NODEID request')
-            self.lsocket_send(ident, self.nodeID)
-
-        if code == SUCCESSOR:
-            log.warning(f'received SUCCESSOR request')
-            self.lsocket_send(ident, self.successor)
-
-        if code == PREDECESSOR:
-            log.warning(f'received PREDECESSOR request')
-            self.lsocket_send(ident, self.predecessor)
-
-        if code == NOTIFY:
-            conn = args[0]
-            log.warning(f'received NOTIFY request for node {conn}')
-            self.notify(conn)
-
-        if code == LOOKUP:
-            log.warning(f'received LOOKUP request')
-            conn = self.lookup(args[0])
-            self.lsocket_send(ident, conn)
-
-        if code == FIND_PREDECESSOR:
-            log.warning(f'received FIND_PREDECESSOR request')
-            conn = self.find_predecessor(args[0])
-            log.warning(f'predecessor of {args[0]} is {conn}')
-            self.lsocket_send(ident, conn)
 
 
     def join(self, node):

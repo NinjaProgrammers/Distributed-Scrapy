@@ -15,7 +15,7 @@ MESSAGE_TIMEOUT = 1000
 
 TRIES = 3
 RETRANSMITS = 5
-
+THREADS = 5
 
 class Conn:
     def __init__(self, address, nodeID):
@@ -34,10 +34,18 @@ class Node:
 
         # Socket to listen requests from other nodes
         self.context = zmq.Context()
+
         self.lsock = self.context.socket(zmq.ROUTER)
         self.listen_address = f'tcp://{self.host}:{portin}'
         self.lsock.bind(self.listen_address)
         log.warning(f'socket binded to {self.listen_address}')
+
+        self.worker_address = f'inproc://workers{portin}'
+        self.wsock = self.context.socket(zmq.DEALER)
+        self.wsock.bind(self.worker_address)
+        for i in range(THREADS):
+            threading.Thread(target=self.worker, args=(self.worker_address,)).start()
+
         #self.lsock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
         # self.lsock.setsockopt(zmq.LINGER, 50000)
 
@@ -63,10 +71,10 @@ class Node:
 
         self.election_boolean = False
 
-        log.warning('listening for connections')
-        threading.Thread(target=self.manageConnections).start()
-        log.warning('starting pinging daemon')
-        #threading.Thread(target=self.pingingDaemon).start()
+        threading.Thread(target=self.pingingDaemon).start()
+
+        zmq.device(zmq.QUEUE, self.lsock, self.wsock)
+
 
     @property
     def leader(self):
@@ -99,20 +107,6 @@ class Node:
 
         return reply
 
-    def lsocket_recv(self):
-        try:
-            ident, reply = self.lsock.recv_multipart()
-            reply = pickle.loads(reply)
-        except Exception as e:
-            # print(e)
-            ident, reply = None, None
-
-        return ident, reply
-
-    def lsocket_send(self, ident, msg=(ACK, None)):
-        msg = pickle.dumps(msg)
-        self.lsock.send_multipart([ident, msg])
-
     def join(self, address):
         # message to join a group
         message = (JOIN, self.listen_address)
@@ -131,23 +125,40 @@ class Node:
                 log.warning(f'received ACK reply')
                 break
 
-    def manageConnections(self):
-        while True:
-            ident, data = self.lsocket_recv()
-            if data is None: continue
-            self.manageRequest(ident, data)
+    def send_response(self, socket, ident1, ident2, msg):
+        data = pickle.dumps(msg)
+        socket.send_multipart((ident1,ident2,data))
 
-    def manageRequest(self, ident, data):
+
+    def worker(self, worker_address):
+        sock = self.context.socket(zmq.ROUTER)
+        sock.connect(worker_address)
+
+        while True:
+            ident1, ident2, data = sock.recv_multipart()
+
+            def send_response(msg):
+                data = pickle.dumps(msg)
+                sock.send_multipart((ident1, ident2, data))
+
+            data = pickle.loads(data)
+            response = self.manage_request(send_response, data)
+
+            bits = pickle.dumps(response)
+            sock.send_multipart([ident1, ident2, bits])
+
+
+    def manage_request(self, send_response, data):
         code, *args = data
         if code == JOIN:
             log.warning(f'received JOIN request from {args[0]}')
-            self.lsocket_send(ident)
+            send_response((ACK, None))
             # Accept new node in the group
             self.manageJOIN(args[0])
 
         if code == NEW_NODE:
             log.warning(f'received NEW_NODE request for {args[0]}')
-            self.lsocket_send(ident)
+            send_response((ACK, None))
             self.manageNEW_NODE(args[0])
 
         if code == ADD_NODE:
@@ -162,13 +173,12 @@ class Node:
 
         if code == ELECTION:
             log.warning(f'received ELECTION request from node {args[0]}')
-            msg = (ACK,)
-            self.lsocket_send(ident, msg)
+            send_response((ACK, None))
             self.manageELECTION()
 
         if code == COORDINATOR:
             log.warning(f'received COORDINATOR request from node {args[0]}')
-            self.lsocket_send(ident)
+            send_response((ACK, None))
             if args[0] < self.leaderID: return
             self.leaderID = args[0]
             self.election_boolean = False
@@ -187,12 +197,13 @@ class Node:
             else:
                 id, address = args
                 self.connections.append(Conn(address, id))
-            self.lsocket_send(ident, message)
+            send_response(message)
             log.warning(f'sended PONG response')
 
         if code == PULL:
             log.warning(f'received PULL request from {args[0]}')
             msg = (ACK, self.connections)
+            send_response(msg)
             conn = self.getConnectionByID(args[0])
             self.ssocket_send(msg, conn.address)
 
@@ -293,7 +304,7 @@ class Node:
         reply = self.ssocket_send(msg, conn.address)
         return reply
 
-    '''
+
     def pingingDaemon(self):
         self.btime = time.time()
         while True:
@@ -340,7 +351,7 @@ class Node:
                         self.manageELECTION()
 
             time.sleep(len(self.connections) * 5)
-    '''
+
 
 def main():
     import argparse
