@@ -90,11 +90,11 @@ class Node:
 
         log.warning('starting daemons')
         threading.Thread(target=self.stabilize_daemon).start()
+        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
+        #zmq.device(zmq.QUEUE, self.lsock, self.wsock)
 
-        zmq.device(zmq.QUEUE, self.lsock, self.wsock)
 
-
-        #threading.Thread(target=self.successors_daemon).start()
+        threading.Thread(target=self.successors_daemon).start()
 
     def ssocket_send(self, msg, address, WaitForReply=True):
         msg = pickle.dumps(msg)
@@ -247,6 +247,7 @@ class Node:
 
     def lookup(self, id):
         p = self.find_predecessor(id)
+        if p is None: return self.conn
         ret = self._successor_(p.address)
         return ret
 
@@ -318,6 +319,19 @@ class Node:
     def fix_successors(self):
         if len(self.successors) == 0: return
         if len(self.successors) < self.NBits:
+            if not self.ping(self.successor.address):
+                self.succsem.acquire()
+                self.successors.pop(0)
+                self.succsem.release()
+                self.FTsem.acquire()
+                if len(self.successors) > 0:
+                    self.FT[1] = self.successors[0]
+                else:
+                    self.FT[1] = self.conn
+                self.FTsem.release()
+                log.warning(f'Successors: {[i for i in self.successors]}')
+                return
+
             node = self.successors[-1]
             if node is None or not self.ping(node.address):
                 self.succsem.acquire()
@@ -329,7 +343,7 @@ class Node:
                 self.succsem.acquire()
                 self.successors.append(new)
                 self.succsem.release()
-                log.warning(f'added {new} as successor')
+                #log.warning(f'added {new} as successor')
                 log.warning(f'Successors: {[i for i in self.successors]}')
 
 

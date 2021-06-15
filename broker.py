@@ -205,7 +205,7 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
             c = random.choice(arr)
             arr.remove(c)
             log.warning("Sending GET_URL" + url+ " to node:" + c.address)
-            reply = self.ssocket_send((GET_URL, url, hash(url)), c.address)
+            reply = self.ssocket_send((GET_URL, url), c.address)
             print("REPLY  received ")
             return reply
         return "Empty"
@@ -215,7 +215,7 @@ class Broker(chordServer.Node, FlatServer.Node, HTTPServer):
 
         c = random.choice(self.nodes)
         log.warning("Sending SAVE_HTML to node" + c.address )
-        self.ssocket_send((SAVE_URL, url, hash(url), html), c.address)
+        self.ssocket_send((SAVE_URL, url, html), c.address)
 
 
     def get_html(self, url, domain, depth):

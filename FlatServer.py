@@ -69,11 +69,11 @@ class Node:
             self.connections = [Conn(self.listen_address, self.nodeID)]
             self.leaderID = self.nodeID
 
-        self.election_boolean = False
+        self.electionID = -1
+        self.new_node_queue = []
 
         threading.Thread(target=self.pingingDaemon).start()
-
-        zmq.device(zmq.QUEUE, self.lsock, self.wsock)
+        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
 
 
     @property
@@ -90,21 +90,21 @@ class Node:
         if len(arr) == 0: return None
         return arr[0]
 
-    def ssocket_send(self, msg, address):
+    def ssocket_send(self, msg, address, WaitForReply=True):
         msg = pickle.dumps(msg)
-
         self.sem.acquire()
         self.ssock.connect(address)
         self.ssock.send(msg)
-
-        try:
-            reply = pickle.loads(self.ssock.recv())
-        except Exception as e:
-            log.error("TIMEOUT ERROR")
+        if WaitForReply:
+            try:
+                reply = pickle.loads(self.ssock.recv())
+            except Exception as e:
+                log.error("TIMEOUT ERROR")
+                reply = None
+        else:
             reply = None
         self.ssock.disconnect(address)
         self.sem.release()
-
         return reply
 
     def join(self, address):
@@ -113,7 +113,7 @@ class Node:
         btime = time.time()
 
         while True:
-            log.warning(f'sending JOIN request from {self.listen_address}')
+            log.warning(f'sending JOIN request to {address}')
             reply = self.ssocket_send(message, address)
             if reply is None:
                 if time.time() - btime > WAIT_TIMEOUT:
@@ -174,14 +174,18 @@ class Node:
         if code == ELECTION:
             log.warning(f'received ELECTION request from node {args[0]}')
             send_response((ACK, None))
-            self.manageELECTION()
+            self.manageELECTION(args[0])
 
         if code == COORDINATOR:
             log.warning(f'received COORDINATOR request from node {args[0]}')
             send_response((ACK, None))
             if args[0] < self.leaderID: return
             self.leaderID = args[0]
-            self.election_boolean = False
+            self.electionID = -1
+
+            while len(self.new_node_queue) > 0:
+                address = self.new_node_queue.pop()
+                self.manageJOIN(address)
 
         if code == ACCEPTED:
             log.warning(f'received ACCEPTED reply')
@@ -205,7 +209,7 @@ class Node:
             msg = (ACK, self.connections)
             send_response(msg)
             conn = self.getConnectionByID(args[0])
-            self.ssocket_send(msg, conn.address)
+            self.ssocket_send(msg, conn.address, False)
 
         if code == PUSH:
             log.warning(f'received PUSH response')
@@ -217,6 +221,10 @@ class Node:
 
     # address is the listening address of the socket connecting
     def manageJOIN(self, address):
+        if self.electionID != -1:
+            self.new_node_queue.append(address)
+            return
+
         # I am the coordinator
         if self.leaderID == self.nodeID:
             self.manageNEW_NODE(address)
@@ -229,7 +237,8 @@ class Node:
             if conn.retransmits > RETRANSMITS:
                 conn.retransmits = 0
                 conn.active = False
-                self.manageELECTION()
+                self.new_node_queue.append(address)
+                self.manageELECTION(self.nodeID)
                 break
 
             conn.retransmits += 1
@@ -256,7 +265,7 @@ class Node:
 
         log.warning(f'sending ACCEPTED request to {address}')
         msg = (ACCEPTED, newID, self.connections, self.nodeID)
-        self.ssocket_send(msg, address)
+        self.ssocket_send(msg, address, False)
 
         msg = (ADD_NODE, newID, address)
         self.broadcast(msg, exc=[address])
@@ -270,33 +279,42 @@ class Node:
         for conn in self.connections:
             if not conn.address in exc:
                 log.warning(f'broadcast {msg} to {conn.address}')
-                self.ssocket_send(msg, conn.address)
+                self.ssocket_send(msg, conn.address, False)
 
-    def manageELECTION(self):
+    def manageELECTION(self, electionID):
         '''
         Starts an election procedure
         :return: None
         '''
-        if self.election_boolean: return
-        self.election_boolean = True
+        if self.electionID != -1: return
+        self.electionID = electionID
         self.leaderID = -1
 
         log.warning(f'started election in node {self.nodeID}')
-        msg = (ELECTION, self.nodeID)
+        msg = (ELECTION, self.electionID)
+        lastBully = None
         for conn in [i for i in self.connections if i.nodeID > self.nodeID]:
             reply = self.ssocket_send(msg, conn.address)
-            if not reply is None:
+            if not reply is None and (lastBully is None or lastBully.nodeID < conn.nodeID):
                 log.warning(f'received bully response from {conn.nodeID}')
+                lastBully = conn
                 break
-        else:
+
+        if lastBully is None:
             log.warning(f'stablishing as coordinator')
             self.leaderID = self.nodeID
             msg = (COORDINATOR, self.nodeID)
             for conn in self.connections:
                 if conn.address != self.listen_address:
                     log.warning(f'sending COORDINATOR request to {conn.address}')
-                    self.ssocket_send(msg, conn.address)
-            self.election_boolean = False
+                    self.ssocket_send(msg, conn.address, False)
+            self.electionID = -1
+            for address in self.new_node_queue:
+                self.manageNEW_NODE(address)
+        else:
+            for address in self.new_node_queue:
+                self.ssocket_send((JOIN, address), lastBully.address)
+
 
     def ping(self, ID):
         conn = self.getConnectionByID(ID)
@@ -336,7 +354,7 @@ class Node:
                     if conn.retransmits > RETRANSMITS:
                         conn.active = False
                         if conn.nodeID == self.leaderID:
-                            self.manageELECTION()
+                            self.manageELECTION(self.nodeID)
                 else:
                     conn.active = True
                     conn.retransmits = 0
@@ -345,10 +363,10 @@ class Node:
 
                     if l != len(self.connections):
                         msg = (PULL, self.nodeID)
-                        reply = self.ssocket_send(msg, conn.address)
+                        self.ssocket_send(msg, conn.address, False)
 
                     if leaderID != self.leaderID:
-                        self.manageELECTION()
+                        self.manageELECTION(self.nodeID)
 
             time.sleep(len(self.connections) * 5)
 
