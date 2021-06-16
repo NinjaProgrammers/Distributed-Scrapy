@@ -207,7 +207,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             arr.remove(c)
 
             log.warning("Sending GET_URL" + url+ " to node:" + c.address)
-            reply = self.ssocket_send((GET_URL, url), c.address)
+            reply = self.ssocket_send((GET_URL, url), c)
             if reply is None:
                 c.active = False
                 continue
@@ -222,7 +222,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             arr.remove(c)
 
             log.warning("Sending SAVE_HTML to node" + c.address )
-            reply = self.ssocket_send((SAVE_URL, url, html), c.address)
+            reply = self.ssocket_send((SAVE_URL, url, html), c)
             if reply is None or reply != ACK:
                 c.active = False
                 continue

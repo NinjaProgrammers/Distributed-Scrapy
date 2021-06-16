@@ -21,10 +21,22 @@ class Conn:
     def __init__(self, address, nodeID, udp_address):
         self.nodeID = nodeID
         self.address = address
+        self.udp_address = udp_address
         self.retransmits = 0
         self.active = True
-        self.udp_address = udp_address
 
+
+    def __cmp__(self, other):
+        return 0 if self.nodeID <= other.nodeID else 1
+
+    def __eq__(self, other):
+        return self.nodeID == other.nodeID
+
+    def __le__(self, other):
+        return self.nodeID <= other.nodeID
+
+    def __lt__(self, other):
+        return self.nodeID < other.nodeID
 
 class Node:
 
@@ -86,6 +98,8 @@ class Node:
         threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
 
 
+
+
     @property
     def leader(self):
         return self.getConnectionByID(self.leaderID)
@@ -100,69 +114,80 @@ class Node:
         if len(arr) == 0: return None
         return arr[0]
 
-    def ssocket_send(self, msg, address, WaitForReply=True):
+    def send(self, msg, address):
         msg = pickle.dumps(msg)
         self.sem.acquire()
         self.ssock.connect(address)
         self.ssock.send(msg)
-        if WaitForReply:
+        reply = None
+        try:
+            reply = pickle.loads(self.ssock.recv())
+        except Exception as e:
+            pass
+        self.ssock.disconnect(address)
+        self.sem.release()
+        return reply
+
+    def ssocket_send(self, msg, conn, WaitForReply=True):
+        msg = pickle.dumps(msg)
+        self.sem.acquire()
+        self.ssock.connect(conn.address)
+        self.ssock.send(msg)
+        reply = None
+        while WaitForReply:
             try:
                 reply = pickle.loads(self.ssock.recv())
             except Exception as e:
-                log.error("TIMEOUT ERROR")
-                reply = None
-        else:
-            reply = None
-        self.ssock.disconnect(address)
+                pass
+
+            if reply is None and self.ping(conn):
+                continue
+            else:
+                break
+        self.ssock.disconnect(conn.address)
         self.sem.release()
         return reply
 
     def pong(self):
         while True:
-            msg, addr = self.spong.recvfrom(1024)
+            try:
+                msg, addr = self.spong.recvfrom(1024)
+            except Exception:
+                continue
             if not msg: continue
             msg = pickle.loads(msg)
             if msg == PING:
                 log.warning(f'received PING from {addr}')
-                reply = pickle.dumps((PONG, self.leaderID, len(self.connections)))
+                reply = pickle.dumps(PONG)
                 self.spong.sendto(reply, addr)
 
     def ping(self, node):
-        if node == self.udp_address: return PONG, None, None
-        log.warning(f'pinging {node}')
+        if node.udp_address == self.udp_address: return True
+        log.warning(f'pinging {node.nodeID}')
         msg = pickle.dumps(PING)
-        for i in range(5):
-            self.sping.sendto(msg, node)
+        for i in range(3):
+            self.sping.sendto(msg, node.udp_address)
             try:
                 reply, addr = self.sping.recvfrom(1024)
-            except socket.timeout:
+            except Exception:
                 continue
             reply = pickle.loads(reply)
-            if reply[0] == PONG: return reply
+            if reply == PONG: return True
         log.warning(f'pinging returned False')
-        return None
+        return False
 
     def join(self, address):
         # message to join a group
-        message = (JOIN, self.listen_address, self.udp_address)
-        btime = time.time()
+        msg = (JOIN, self.listen_address, self.udp_address)
+        log.warning(f'sending JOIN request to {address}')
+        reply = self.send(msg, address)
 
-        while True:
-            log.warning(f'sending JOIN request to {address}')
-            reply = self.ssocket_send(message, address)
-            if reply is None:
-                if time.time() - btime > WAIT_TIMEOUT:
-                    raise Exception('cannot reach node')
-                continue
-            code, *args = reply
+        if reply is None:
+            raise Exception('cannot reach node')
+        code, *args = reply
 
-            if code == ACK:
-                log.warning(f'received ACK reply')
-                break
-
-    def send_response(self, socket, ident1, ident2, msg):
-        data = pickle.dumps(msg)
-        socket.send_multipart((ident1,ident2,data))
+        if code == ACK:
+            log.warning(f'received ACK reply')
 
 
     def worker(self, worker_address):
@@ -177,6 +202,7 @@ class Node:
                 sock.send_multipart((ident1, ident2, data))
 
             data = pickle.loads(data)
+            log.warning(data)
             response = self.manage_request(send_response, data)
 
             bits = pickle.dumps(response)
@@ -230,18 +256,14 @@ class Node:
 
         if code == PULL:
             log.warning(f'received PULL request from {args[0]}')
-            msg = (ACK, self.connections)
+            ans = self.managePULL(args[0])
+            msg = (PUSH, ans , self.leaderID)
             send_response(msg)
-            conn = self.getConnectionByID(args[0])
-            self.ssocket_send(msg, conn.address, False)
 
-        if code == PUSH:
-            log.warning(f'received PUSH response')
-            arr = args[0]
-            for conn in arr:
-                temp = self.getConnectionByID(conn.nodeID)
-                if temp is None:
-                    self.connections.append(conn)
+
+    def managePULL(self, node):
+        item = self.getConnectionByID(node)
+        return item
 
     # address is the listening address of the socket connecting
     def manageJOIN(self, address, udp_address):
@@ -257,24 +279,18 @@ class Node:
         # Tell coordinator node the new node address
         new_node_message = (NEW_NODE, address, udp_address)
         conn = self.leader
-        while True:
-            if conn.retransmits > RETRANSMITS:
-                conn.retransmits = 0
-                conn.active = False
-                self.new_node_queue.append((address, udp_address))
-                self.manageELECTION(self.nodeID)
-                break
 
-            conn.retransmits += 1
-            # Sending message of new node to the leader
-            log.warning(f'sending NEW_NODE request to {conn.address} for {address}')
-            reply = self.ssocket_send(new_node_message, conn.address)
+        log.warning(f'sending NEW_NODE request to {conn.address} for {address}')
+        reply = self.ssocket_send(new_node_message, conn)
 
-            if reply is None: continue
+        if reply is None:
+            self.new_node_queue.append((address, udp_address))
+            self.manageELECTION(self.nodeID)
+        else:
             code, *args = reply
             if code == ACK:
                 log.warning(f'received ACK reply')
-                break
+
 
     def manageNEW_NODE(self, address, udp_address):
         newID = len(self.connections)
@@ -283,13 +299,14 @@ class Node:
 
         conn = self.getConnectionByAddress(address)
         if conn is None:
-            self.connections.append(Conn(address, newID, udp_address))##################
+            conn = Conn(address, newID, udp_address)
+            self.connections.append(conn)
         else:
             return
 
         log.warning(f'sending ACCEPTED request to {address}')
         msg = (ACCEPTED, newID, self.connections, self.nodeID)
-        self.ssocket_send(msg, address, False)
+        self.ssocket_send(msg, conn, False)
 
         msg = (ADD_NODE, newID, address, udp_address)
         self.broadcast(msg, exc=[address])
@@ -303,7 +320,7 @@ class Node:
         for conn in self.connections:
             if conn.address not in exc:
                 log.warning(f'broadcast {msg} to {conn.address}')
-                self.ssocket_send(msg, conn.address, False)
+                self.ssocket_send(msg, conn, False)
 
     def manageELECTION(self, electionID):
         '''
@@ -318,7 +335,7 @@ class Node:
         msg = (ELECTION, self.electionID)
         lastBully = None
         for conn in [i for i in self.connections if i.nodeID > self.nodeID]:
-            reply = self.ssocket_send(msg, conn.address)
+            reply = self.ssocket_send(msg, conn)
             if not reply is None and (lastBully is None or lastBully.nodeID < conn.nodeID):
                 log.warning(f'received bully response from {conn.nodeID}')
                 lastBully = conn
@@ -331,21 +348,23 @@ class Node:
             for conn in self.connections:
                 if conn.address != self.listen_address:
                     log.warning(f'sending COORDINATOR request to {conn.address}')
-                    self.ssocket_send(msg, conn.address, False)
+                    self.ssocket_send(msg, conn, False)
             self.electionID = -1
             for (address, udp_address) in self.new_node_queue:
                 self.manageNEW_NODE(address, udp_address)
         else:
             for (address, udp_address) in self.new_node_queue:
-                self.ssocket_send((JOIN, address, udp_address), lastBully.address, False)
+                self.ssocket_send((JOIN, address, udp_address), lastBully, False)
 
-    '''
-    def ping(self, ID):
-        conn = self.getConnectionByID(ID)
-        msg = (PING, self.nodeID, self.listen_address)
-        reply = self.ssocket_send(msg, conn.address)
-        return reply
-    '''
+
+    def missing(self):
+        self.connections.sort()
+        #sort = sorted(self.connections)
+        node = len(self.connections)
+        for i, item in enumerate(self.connections):
+            if i != item.nodeID:
+                node = i
+        return node
 
     def pingingDaemon(self):
         self.btime = time.time()
@@ -371,9 +390,9 @@ class Node:
             if len(seq) != 0:
                 conn = random.choice(seq)
                 log.warning(f'pinging node {conn.udp_address}')
-                reply = self.ping(conn.udp_address)
+                ping = self.ping(conn)
 
-                if reply is None:
+                if not ping:
                     conn.retransmits += 1
                     if conn.retransmits > RETRANSMITS:
                         conn.active = False
@@ -383,14 +402,25 @@ class Node:
                     conn.active = True
                     conn.retransmits = 0
                     log.warning(f'received PONG response')
-                    code, leaderID, l = reply
 
-                    if l != len(self.connections):
-                        msg = (PULL, self.nodeID)
-                        self.ssocket_send(msg, conn.address, False)
+                    missing = self.missing()
 
-                    if leaderID != self.leaderID:
-                        self.manageELECTION(self.nodeID)
+                    msg = (PULL, missing)
+                    reply = self.ssocket_send(msg, conn)
+
+                    if not reply is None:
+                        code, conn, leader = reply
+
+                        if code == PUSH:
+                            log.warning(f'received PUSH response')
+
+                            if not conn is None:
+                                temp = self.getConnectionByID(conn.nodeID)
+                                if not temp is None:
+                                    self.connections.append(conn)
+
+                            if leader != self.leaderID:
+                                self.manageELECTION(self.nodeID)
 
             time.sleep(len(self.connections) * 5)
 

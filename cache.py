@@ -59,7 +59,8 @@ class CacheNode(Node):
                 response = ACK
             else:
                 log.warning("Sending SAVE_URL to node: " + node.address)
-                response = self.ssocket_send((SAVE_URL, key, text), node.address)
+                response = self.ssocket_send((SAVE_URL, key, text), node)
+
 
         if code == GET_URL:
             key = args[0]
@@ -82,7 +83,7 @@ class CacheNode(Node):
                 self.dsem.release()
             else:
                 log.warning(f"Sending GET_URL {key}   H: {hash} to node: {node.address}")
-                text = self.ssocket_send((GET_URL, key), node.address)
+                text = self.ssocket_send((GET_URL, key), node)
             #log.warning("SENDING URL" + text[0:4])
             response = text
 
@@ -114,7 +115,7 @@ class CacheNode(Node):
                 for i, succ in enumerate(self.successors):
                     if i < 3:
                         log.warning(f'data replicated to {succ.nodeID}')
-                        self.ssocket_send((PUSH, [cap]), succ.address)
+                        self.ssocket_send((PUSH, [cap]), succ)
 
         threading.Thread(target=replicate, args=(cap,)).start()
 
@@ -124,7 +125,7 @@ class CacheNode(Node):
         self.pull()
 
     def pull(self):
-        reply = self.ssocket_send((PULL, self.nodeID), self.successor.address)
+        reply = self.ssocket_send((PULL, self.nodeID), self.successor)
         log.warning(f'pulled {reply}')
         if reply is None: return
         for c in reply:
@@ -139,7 +140,7 @@ class CacheNode(Node):
                 arr = [c for c in self.data.values() if self.between(c.hash, p.nodeID + 1, self.nodeID + 1)]
                 if len(arr) > 0:
                     log.warning(f'pushing to {succ}')
-                    self.ssocket_send((PUSH, arr), succ.address, False)
+                    self.ssocket_send((PUSH, arr), succ, False)
             time.sleep((len(self.successors) + 1) * 5)
 
 
