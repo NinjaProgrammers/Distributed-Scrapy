@@ -121,7 +121,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
 
 class Broker(chordServer.node, FlatServer.Node, HTTPServer):
-    def __init__(self, portin=5000, portout=5001, serveraddress=None, nbits=30, httpport=5002, handler=HTTPHandler):
+    def __init__(self, portin=5000, serveraddress=None, nbits=30, httpport=5002, handler=HTTPHandler):
         chordServer.node.__init__(self, nbits=nbits)
 
         host = socket.gethostname()
@@ -130,7 +130,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
         log.warning(f'Running HTTP server in http://{host}:{httpport}')
         HTTPServer.__init__(self, address, handler)
         threading.Thread(target=self.serve_forever).start()
-        FlatServer.Node.__init__(self, portin=portin, portout=portout, serveraddress=serveraddress)
+        FlatServer.Node.__init__(self, portin=portin, serveraddress=serveraddress)
 
 
     def manage_request(self, send_response, data):
@@ -139,25 +139,25 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
         code, *args = data
         if code == JOIN_GROUP:
             log.warning(f'received JOINGROUP request')
-            role, address, udp_address = args
-            id = self.registerNode(role, address, udp_address)
+            address, udp_address = args
+            id = self.registerNode(address, udp_address)
             send_response((id, self.NBits))
-            msg = (ADD_GROUP, role, id, address, udp_address)
+            msg = (ADD_GROUP, id, address, udp_address)
             self.broadcast(msg)
 
         if code == RANDOM_NODE:
             log.warning(f'received RANDOMNODE request')
-            role, exceptions = args
-            node = self.getRandomNode(role, exceptions)
+            exceptions = args[0]
+            node = self.getRandomNode(exceptions)
             if node is None:
                 send_response((None, None, None))
             else:
                 send_response((node.key, node.address, node.udp_address))
 
         if code == ADD_GROUP:
-            role, id, address, udp_address = args
+            id, address, udp_address = args
             log.warning(f'received AdToGroup for {id}')
-            self.addToGroup(role, id, address, udp_address)
+            self.addToGroup(id, address, udp_address)
 
     def __scrap_urls__(self, url, domain, nivel):
         log.error("SCRAPPING....")
@@ -201,7 +201,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
 
 
     def __get_html_cache_nodes__(self, url):
-        arr = [i for i in self.nodes if i.active]
+        arr = [i for i in self.nodes]
         while len(arr) > 0:
             c = random.choice(arr)
             arr.remove(c)
@@ -216,9 +216,9 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
         return "Empty"
 
     def __save_html_cache__(self, url, html):
-        arr = [i for i in self.nodes if i.active]
+        arr = [i for i in self.nodes]
         while len(arr) > 0:
-            c = random.choice(self.nodes)
+            c = random.choice(arr)
             arr.remove(c)
 
             log.warning("Sending SAVE_HTML to node" + c.address )
@@ -245,8 +245,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--portin', type=int, default=5000, required=False,
                         help='Port for incoming communications on node')
-    parser.add_argument('--portout', type=int, default=5001, required=False,
-                        help='Port for outgoing communications on node')
     parser.add_argument('--address', type=str, required=False,
                         help='Address of node to connect to')
     parser.add_argument('--httpport', type=int, default=5002, required=False,
@@ -256,15 +254,14 @@ def main():
     args = parser.parse_args()
 
     port1 = args.portin
-    port2 = args.portout
     port3 = args.httpport
     nbits = args.nbits
     if args.address:
         host, port = args.address.split(':')
         address = (host, int(port))
-        node = Broker(port1, port2, address, nbits=nbits, httpport=port3)
+        node = Broker(port1, address, nbits=nbits, httpport=port3)
     else:
-        node = Broker(port1, port2, nbits=nbits, httpport=port3)
+        node = Broker(port1, nbits=nbits, httpport=port3)
 
     try:
         node.serve_forever()

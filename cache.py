@@ -4,8 +4,6 @@ import random
 import argparse
 from constants import *
 import logging
-import pickle
-import hashlib
 import time
 
 log = logging.Logger(name='Cache')
@@ -31,10 +29,11 @@ class capsule:
 
 
 class CacheNode(Node):
-    def __init__(self, dns, role):
+    def __init__(self, dns):
         self.dsem = threading.Semaphore()
         self.data = {}
-        super().__init__(dns, role)
+        super().__init__(dns)
+
         threading.Thread(target=self.replicate_daemon).start()
 
     def hash_string(self, target: str):
@@ -56,11 +55,7 @@ class CacheNode(Node):
             log.warning("Save url request for:" + cap.key)
             node = self.lookup(cap.hash)
             if node == self.conn:
-                log.warning("Saving url: " + cap.key)
-                self.dsem.acquire()
-                self.data[cap.key] = cap
-                print(self.data)
-                self.dsem.release()
+                self.save_data(cap)
                 response = ACK
             else:
                 log.warning("Sending SAVE_URL to node: " + node.address)
@@ -106,6 +101,24 @@ class CacheNode(Node):
 
         return response
 
+    def save_data(self, cap):
+        log.warning("Saving url: " + cap.key)
+        self.dsem.acquire()
+        self.data[cap.key] = cap
+        #print(self.data)
+        self.dsem.release()
+
+        def replicate(cap):
+            p = self.predecessor
+            if p is None or self.between(cap.hash, p.nodeID + 1, self.nodeID + 1):
+                for i, succ in enumerate(self.successors):
+                    if i < 3:
+                        log.warning(f'data replicated to {succ.nodeID}')
+                        self.ssocket_send((PUSH, [cap]), succ.address)
+
+        threading.Thread(target=replicate, args=(cap,)).start()
+
+
     def join(self, node):
         super().join(node)
         self.pull()
@@ -133,19 +146,12 @@ class CacheNode(Node):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ns', '--nameserver', required=True, type=str, help='Name server address')
-    #parser.add_argument('--port1', default=5000, required=False, type=int, help='Port for incoming communications')
-    #parser.add_argument('--port2', default=5001, required=False, type=int, help='Port for outgoing communications')
-    parser.add_argument('-r', '--role', default='chordNode', required=False, type=str, help='Node role')
     args = parser.parse_args()
 
     nameserver = args.nameserver
-    role = args.role
 
     host, port = nameserver.split(':')
     port = int(port)
     nameserver = (host, port)
 
-    #port1 = args.port1
-    #port2 = args.port2
-
-    node = CacheNode(nameserver, role)
+    node = CacheNode(nameserver)

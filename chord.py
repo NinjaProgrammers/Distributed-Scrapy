@@ -31,11 +31,10 @@ class conn:
 
 
 class Node:
-    def __init__(self, dns, role):
+    def __init__(self, dns):
         self.replication = 5
 
         self.dns = dns
-        self.role = role
         host = socket.gethostname()
         host = socket.gethostbyname(host)
 
@@ -44,6 +43,7 @@ class Node:
         self.lsock = self.context.socket(zmq.ROUTER)
         port = self.lsock.bind_to_random_port(f'tcp://{host}')
         self.listen_address = f'tcp://{host}:{port}'
+        log.warning(f'listening requests at {self.listen_address}')
 
         self.worker_address = f'inproc://workers{port}'
         self.wsock = self.context.socket(zmq.DEALER)
@@ -65,7 +65,7 @@ class Node:
 
 
         server = f'tcp://{self.dns[0]}:{self.dns[1]}'
-        reply = self.ssocket_send((JOIN_GROUP, self.role, self.listen_address, self.udp_address), server)
+        reply = self.ssocket_send((JOIN_GROUP, self.listen_address, self.udp_address), server)
         if reply is None:
             raise Exception('server not responding')
         self.nodeID, self.NBits = reply
@@ -80,7 +80,7 @@ class Node:
         log.warning(f'node {self.nodeID} started')
         exceptions = [self.nodeID]
         while True:
-            reply = self.ssocket_send((RANDOM_NODE, self.role, exceptions), server)
+            reply = self.ssocket_send((RANDOM_NODE, exceptions), server)
             if reply is None:
                 raise Exception('server not responding')
             id, name, udp_address = reply
@@ -140,7 +140,9 @@ class Node:
             except socket.timeout:
                 continue
             reply = pickle.loads(reply)
-            if reply == PONG: return True
+            if reply == PONG:
+                log.warning('received PONG response')
+                return True
         log.warning(f'pinging returned False')
         return False
 
@@ -160,9 +162,6 @@ class Node:
     def manage_request(self, data):
         code, *args = data
         response = None
-        if code == PING:
-            # log.warning(f'received PING request')
-            response = PONG
 
         if code == NODEID:
             log.warning(f'received NODEID request')
@@ -207,21 +206,6 @@ class Node:
 
     @property
     def successor(self):
-        '''
-        node = self.FT[1]
-        if node is None or not self.ping(node.address):
-            self.succsem.acquire()
-            if len(self.successors) > 0:
-                self.successors.pop(0)
-            self.succsem.release()
-            self.FTsem.acquire()
-            if len(self.successors) > 0:
-                self.FT[1] = self.successors[0]
-            else:
-                self.FT[1] = self.conn
-            self.FTsem.release()
-            return self.successor
-        '''
         return self.FT[1]
 
     @successor.setter
@@ -340,7 +324,7 @@ class Node:
     def successors_daemon(self):
         while True:
             self.fix_successors()
-            time.sleep((len(self.successors) + 1) * 5)
+            time.sleep(2)
 
     def fix_successors(self):
         if len(self.successors) == 0: return
@@ -379,19 +363,12 @@ class Node:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-ns', '--nameserver', required=True, type=str, help='Name server address')
-    parser.add_argument('--port1', default=5000, required=False, type=int, help='Port for incoming communications')
-    parser.add_argument('--port2', default=5001, required=False, type=int, help='Port for outgoing communications')
-    parser.add_argument('-r', '--role', default='chordNode', required=False, type=str, help='Node role')
     args = parser.parse_args()
 
     nameserver = args.nameserver
-    role = args.role
 
     host, port = nameserver.split(':')
     port = int(port)
     nameserver = (host, port)
 
-    port1 = args.port1
-    port2 = args.port2
-
-    node = Node(nameserver, role, port1, port2)
+    node = Node(nameserver)

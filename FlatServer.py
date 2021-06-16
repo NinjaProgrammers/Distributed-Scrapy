@@ -11,23 +11,24 @@ log = logging.Logger(name='Flat Server')
 logging.basicConfig(level=logging.DEBUG)
 
 WAIT_TIMEOUT = 5
-MESSAGE_TIMEOUT = 1000
+MESSAGE_TIMEOUT = 5000
 
 TRIES = 3
 RETRANSMITS = 5
 THREADS = 5
 
 class Conn:
-    def __init__(self, address, nodeID):
+    def __init__(self, address, nodeID, udp_address):
         self.nodeID = nodeID
         self.address = address
         self.retransmits = 0
         self.active = True
+        self.udp_address = udp_address
 
 
 class Node:
 
-    def __init__(self, portin=5000, portout=5001, serveraddress=None):
+    def __init__(self, portin=5000, serveraddress=None):
         # My Address
         hostname = socket.gethostname()
         self.host = socket.gethostbyname(hostname)
@@ -51,7 +52,7 @@ class Node:
 
         self.sem = threading.Semaphore()
         self.ssock = self.context.socket(zmq.DEALER)
-        self.ssock.bind(f'tcp://{self.host}:{portout}')
+        self.ssock.bind_to_random_port(f'tcp://{self.host}')
         self.ssock.setsockopt(zmq.RCVTIMEO, MESSAGE_TIMEOUT)
         # self.ssock.setsockopt(zmq.LINGER, 50000)
 
@@ -60,18 +61,27 @@ class Node:
         self.nodeID = 0
         self.connections = []
 
+        # Ping-Pong sockets
+        self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sping.settimeout(1)
+        self.spong = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.spong.bind((self.host, 0))
+        self.udp_address = self.spong.getsockname()
+        print(f"UDP address {self.udp_address}")
+
         log.warning('starting flat server')
 
         if serveraddress:
             address = f'tcp://{serveraddress[0]}:{serveraddress[1]}'
             self.join(address)
         else:
-            self.connections = [Conn(self.listen_address, self.nodeID)]
+            self.connections = [Conn(self.listen_address, self.nodeID, self.udp_address)]
             self.leaderID = self.nodeID
 
         self.electionID = -1
         self.new_node_queue = []
 
+        threading.Thread(target=self.pong).start()
         threading.Thread(target=self.pingingDaemon).start()
         threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
 
@@ -107,9 +117,34 @@ class Node:
         self.sem.release()
         return reply
 
+    def pong(self):
+        while True:
+            msg, addr = self.spong.recvfrom(1024)
+            if not msg: continue
+            msg = pickle.loads(msg)
+            if msg == PING:
+                log.warning(f'received PING from {addr}')
+                reply = pickle.dumps((PONG, self.leaderID, len(self.connections)))
+                self.spong.sendto(reply, addr)
+
+    def ping(self, node):
+        if node == self.udp_address: return PONG, None, None
+        log.warning(f'pinging {node}')
+        msg = pickle.dumps(PING)
+        for i in range(5):
+            self.sping.sendto(msg, node)
+            try:
+                reply, addr = self.sping.recvfrom(1024)
+            except socket.timeout:
+                continue
+            reply = pickle.loads(reply)
+            if reply[0] == PONG: return reply
+        log.warning(f'pinging returned False')
+        return None
+
     def join(self, address):
         # message to join a group
-        message = (JOIN, self.listen_address)
+        message = (JOIN, self.listen_address, self.udp_address)
         btime = time.time()
 
         while True:
@@ -154,22 +189,24 @@ class Node:
             log.warning(f'received JOIN request from {args[0]}')
             send_response((ACK, None))
             # Accept new node in the group
-            self.manageJOIN(args[0])
+            address, udp_address = args
+            self.manageJOIN(address, udp_address)
 
         if code == NEW_NODE:
             log.warning(f'received NEW_NODE request for {args[0]}')
             send_response((ACK, None))
-            self.manageNEW_NODE(args[0])
+            address, udp_address = args
+            self.manageNEW_NODE(address, udp_address)
 
         if code == ADD_NODE:
             log.warning(f'received ADD_NODE request for {args}')
-            id, address = args
+            id, address, udp_address = args
             conn = self.getConnectionByID(id)
             if not conn is None:
                 log.warning(f'node {id} has reconnected')
                 conn.active = True
             else:
-                self.connections.append(Conn(address, id))
+                self.connections.append(Conn(address, id, udp_address))
 
         if code == ELECTION:
             log.warning(f'received ELECTION request from node {args[0]}')
@@ -184,25 +221,12 @@ class Node:
             self.electionID = -1
 
             while len(self.new_node_queue) > 0:
-                address = self.new_node_queue.pop()
-                self.manageJOIN(address)
+                address, udp_address = self.new_node_queue.pop()
+                self.manageJOIN(address, udp_address)
 
         if code == ACCEPTED:
             log.warning(f'received ACCEPTED reply')
             self.nodeID, self.connections, self.leaderID = args
-
-        if code == PING:
-            log.warning(f'received ping request')
-            message = (PONG, self.leaderID, len(self.connections))
-            conn = self.getConnectionByID(args[0])
-            if not conn is None:
-                conn.retransmits = 0
-                conn.active = True
-            else:
-                id, address = args
-                self.connections.append(Conn(address, id))
-            send_response(message)
-            log.warning(f'sended PONG response')
 
         if code == PULL:
             log.warning(f'received PULL request from {args[0]}')
@@ -220,24 +244,24 @@ class Node:
                     self.connections.append(conn)
 
     # address is the listening address of the socket connecting
-    def manageJOIN(self, address):
+    def manageJOIN(self, address, udp_address):
         if self.electionID != -1:
-            self.new_node_queue.append(address)
+            self.new_node_queue.append((address, udp_address))
             return
 
         # I am the coordinator
         if self.leaderID == self.nodeID:
-            self.manageNEW_NODE(address)
+            self.manageNEW_NODE(address, udp_address)
             return
 
         # Tell coordinator node the new node address
-        new_node_message = (NEW_NODE, address)
+        new_node_message = (NEW_NODE, address, udp_address)
         conn = self.leader
         while True:
             if conn.retransmits > RETRANSMITS:
                 conn.retransmits = 0
                 conn.active = False
-                self.new_node_queue.append(address)
+                self.new_node_queue.append((address, udp_address))
                 self.manageELECTION(self.nodeID)
                 break
 
@@ -252,14 +276,14 @@ class Node:
                 log.warning(f'received ACK reply')
                 break
 
-    def manageNEW_NODE(self, address):
+    def manageNEW_NODE(self, address, udp_address):
         newID = len(self.connections)
         if self.leaderID != self.nodeID:
             return
 
         conn = self.getConnectionByAddress(address)
         if conn is None:
-            self.connections.append(Conn(address, newID))
+            self.connections.append(Conn(address, newID, udp_address))##################
         else:
             return
 
@@ -267,7 +291,7 @@ class Node:
         msg = (ACCEPTED, newID, self.connections, self.nodeID)
         self.ssocket_send(msg, address, False)
 
-        msg = (ADD_NODE, newID, address)
+        msg = (ADD_NODE, newID, address, udp_address)
         self.broadcast(msg, exc=[address])
 
         log.warning(f"New node received {newID}")
@@ -277,7 +301,7 @@ class Node:
         exc.append(self.listen_address)
 
         for conn in self.connections:
-            if not conn.address in exc:
+            if conn.address not in exc:
                 log.warning(f'broadcast {msg} to {conn.address}')
                 self.ssocket_send(msg, conn.address, False)
 
@@ -309,19 +333,19 @@ class Node:
                     log.warning(f'sending COORDINATOR request to {conn.address}')
                     self.ssocket_send(msg, conn.address, False)
             self.electionID = -1
-            for address in self.new_node_queue:
-                self.manageNEW_NODE(address)
+            for (address, udp_address) in self.new_node_queue:
+                self.manageNEW_NODE(address, udp_address)
         else:
-            for address in self.new_node_queue:
-                self.ssocket_send((JOIN, address), lastBully.address)
+            for (address, udp_address) in self.new_node_queue:
+                self.ssocket_send((JOIN, address, udp_address), lastBully.address, False)
 
-
+    '''
     def ping(self, ID):
         conn = self.getConnectionByID(ID)
         msg = (PING, self.nodeID, self.listen_address)
         reply = self.ssocket_send(msg, conn.address)
         return reply
-
+    '''
 
     def pingingDaemon(self):
         self.btime = time.time()
@@ -346,10 +370,10 @@ class Node:
 
             if len(seq) != 0:
                 conn = random.choice(seq)
-                log.warning(f'pinging node {conn.nodeID}')
-                reply = self.ping(conn.nodeID)
+                log.warning(f'pinging node {conn.udp_address}')
+                reply = self.ping(conn.udp_address)
 
-                if reply is None or reply[0] != PONG:
+                if reply is None:
                     conn.retransmits += 1
                     if conn.retransmits > RETRANSMITS:
                         conn.active = False
@@ -377,20 +401,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--portin', type=int, default=5000, required=False,
                         help='Port for incoming communications on node')
-    parser.add_argument('--portout', type=int, default=5001, required=False,
-                        help='Port for outgoing communications on node')
+    #parser.add_argument('--portout', type=int, default=5001, required=False,
+    #                   help='Port for outgoing communications on node')
     parser.add_argument('--address', type=str, required=False,
                         help='Address of node to connect to')
     args = parser.parse_args()
 
     port1 = args.portin
-    port2 = args.portout
+    #port2 = args.portout
     if args.address:
         host, port = args.address.split(':')
         address = (host, int(port))
-        node = Node(port1, port2, address)
+        node = Node(port1, address)
     else:
-        node = Node(port1, port2)
+        node = Node(port1)
 
 
 if __name__ == '__main__':
