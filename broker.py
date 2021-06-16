@@ -11,11 +11,7 @@ from html.parser import HTMLParser
 from urllib.request import HTTPError, URLError
 from constants import *
 import threading
-
-
-logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
-log = logging.getLogger(__name__)
-
+from logFormatter import logger
 
 
 all_urls = []
@@ -90,7 +86,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
             items = ''
             for item in html:
                 #print('!!!!!!!!!!!!!', item, '!!!!!!!!!!!!!!!!')
-                items += "<h1>URL: " + str(item) + " HTML </h1> "
+                #items += "<h1>URL: " + str(item) + " HTML </h1> "
                 items += str(html[item])
             r = '</p>' \
                 '</form>' \
@@ -106,7 +102,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
                 '<title>Distributed Scrapy</title>' \
                 '</head>' \
                 '<body>' \
-                '<p>Text</p>' \
+                '<p>Insert URL to scrap</p>' \
                 '<form id="MyForm" method="get">' \
                 'Search: <input type="url" name="search">' \
                 'Domain: <input type="text" name="domain">' \
@@ -127,7 +123,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
         host = socket.gethostname()
         host = socket.gethostbyname(host)
         address = (host,  httpport)
-        log.warning(f'Running HTTP server in http://{host}:{httpport}')
+        logger.warning(f'Running HTTP server in http://{host}:{httpport}')
         HTTPServer.__init__(self, address, handler)
         threading.Thread(target=self.serve_forever).start()
         FlatServer.Node.__init__(self, portin=portin, serveraddress=serveraddress)
@@ -138,7 +134,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
 
         code, *args = data
         if code == JOIN_GROUP:
-            log.warning(f'received JOINGROUP request')
+            logger.warning(f'received JOINGROUP request')
             address, udp_address = args
             id = self.registerNode(address, udp_address)
             send_response((id, self.NBits))
@@ -146,7 +142,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             self.broadcast(msg)
 
         if code == RANDOM_NODE:
-            log.warning(f'received RANDOMNODE request')
+            logger.warning(f'received RANDOMNODE request')
             exceptions = args[0]
             node = self.getRandomNode(exceptions)
             if node is None:
@@ -156,11 +152,18 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
 
         if code == ADD_GROUP:
             id, address, udp_address = args
-            log.warning(f'received AdToGroup for {id}')
+            logger.warning(f'received AddToGroup for {id}')
             self.addToGroup(id, address, udp_address)
 
+    def get_data(self):
+        data = super().get_data()
+        data.append(self.nodes)
+        return data
+
+    def manage_ACCEPTED(self, data):
+        self.connections, self.leaderID, self.nodes = data
+
     def __scrap_urls__(self, url, domain, nivel):
-        log.error("SCRAPPING....")
         urls.append(url)
         count = 1
         parser = HtmlParser()
@@ -169,6 +172,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             level = urls.copy()
             urls.clear()
             for url in level:
+                logger.error(f"SCRAPPING.... {url}")
                 print(url)
                 if not (url.startswith("https://") or url.startswith("http://")
                         or url.startswith("file://") or url.startswith("ftp://")):
@@ -179,23 +183,25 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
                     continue
                 html = self.__get_html_cache_nodes__(url)
                 if html != "Empty" and not html is None:
-                    log.warning("CACHE RETURNED HTML")
+                    logger.warning("CACHE RETURNED HTML")
                     answer[url] = html
                     continue
                 try:
-                    log.error("SCRAPPING INTERNET")
-                    r = urllib.request.urlopen(url)
+                    logger.error("SCRAPPING INTERNET")
+                    r = urllib.request.urlopen(url, timeout=30)
                     print("1")
-                    x = str(r.read())
+                    x = r.read().decode('utf-8')
                     print("2")
                     parser.feed(x)
                     print("3")
                     answer[url] = x
                     self.__save_html_cache__(url, x)
                 except HTTPError as e:
-                    log.error(e.getcode())
+                    answer[url] = "HTTP ERROR" + str(e.getcode())
+                    logger.error(e.getcode())
                 except URLError as e:
-                    log.error(e.reason)
+                    answer[url] = "URL ERROR: " + str(e.reason)
+                    logger.error(e.reason)
             count += 1
         urls.clear()
 
@@ -206,7 +212,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             c = random.choice(arr)
             arr.remove(c)
 
-            log.warning("Sending GET_URL" + url+ " to node:" + c.address)
+            logger.warning("Sending GET_URL" + url+ " to node:" + c.address)
             reply = self.ssocket_send((GET_URL, url), c)
             if reply is None:
                 c.active = False
@@ -221,7 +227,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             c = random.choice(arr)
             arr.remove(c)
 
-            log.warning("Sending SAVE_HTML to node" + c.address )
+            logger.warning("Sending SAVE_HTML to node" + c.address )
             reply = self.ssocket_send((SAVE_URL, url, html), c)
             if reply is None or reply != ACK:
                 c.active = False
@@ -232,7 +238,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
     def get_html(self, url, domain, depth):
         global answer
         answer.clear()
-        log.warning("Scrapping URL" + url)
+        logger.warning("Scrapping URL" + url)
         self.__scrap_urls__(url=url, domain=domain, nivel=depth)
         return answer
 
@@ -262,7 +268,6 @@ def main():
         node = Broker(port1, address, nbits=nbits, httpport=port3)
     else:
         node = Broker(port1, nbits=nbits, httpport=port3)
-
     try:
         node.serve_forever()
     except KeyboardInterrupt:

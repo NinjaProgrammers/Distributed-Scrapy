@@ -3,11 +3,9 @@ import threading
 import random
 import argparse
 from constants import *
-import logging
+from logFormatter import logger
 import time
 
-logging.basicConfig(level=logging.DEBUG, format='%(funcName)s -at- %(threadName)s: %(message)s')
-log = logging.getLogger(__name__)
 
 class capsule:
     def __init__(self, key, hash, data):
@@ -37,7 +35,7 @@ class CacheNode(Node):
         threading.Thread(target=self.replicate_daemon).start()
 
     def hash_string(self, target: str):
-        log.warning(f'hashing string {target}')
+        logger.warning(f'hashing string {target}')
         p = 61
         x = 0
         for c in target:
@@ -52,20 +50,20 @@ class CacheNode(Node):
             key, text = args
             hash = self.hash_string(key)
             cap = capsule(key, hash, text)
-            log.warning("Save url request for:" + cap.key)
+            logger.warning("Save url request for:" + cap.key)
             node = self.lookup(cap.hash)
             if node == self.conn:
                 self.save_data(cap)
                 response = ACK
             else:
-                log.warning("Sending SAVE_URL to node: " + node.address)
+                logger.warning("Sending SAVE_URL to node: " + node.address)
                 response = self.ssocket_send((SAVE_URL, key, text), node)
 
 
         if code == GET_URL:
             key = args[0]
             hash = self.hash_string(key)
-            log.warning("GET url request for:" + key)
+            logger.warning("GET url request for:" + key)
 
             while True:
                 response = None
@@ -78,16 +76,16 @@ class CacheNode(Node):
                 '''
 
                 if node == self.conn:
-                    log.warning("I'm in charge of the url: " + key)
+                    logger.warning("I'm in charge of the url: " + key)
                     try:
                         response = self.data[key].data
-                        log.warning("I have  the url: " + key)
+                        logger.warning("I have  the url: " + key)
                     except KeyError:
-                        log.warning("I don't have the url: " + key)
+                        logger.warning("I don't have the url: " + key)
                         response = 'Empty'
                     break
                 else:
-                    log.warning(f"Sending GET_URL {key}   H: {hash} to node: {node.address}")
+                    logger.warning(f"Sending GET_URL {key}   H: {hash} to node: {node.address}")
                     response = self.ssocket_send((GET_URL, key), node)
                     if not response is None:
                         break
@@ -96,13 +94,13 @@ class CacheNode(Node):
 
         if code == PULL:
             id = args[0]
-            log.warning(f'received PULL request fron node {id}')
+            logger.warning(f'received PULL request fron node {id}')
             arr = [c for c in self.data.values() if self.between(c.hash, self.nodeID + 1, id + 1)]
             response = arr
 
         if code == PUSH:
             arr = args[0]
-            log.warning(f'received PUSH request for {arr}')
+            logger.warning(f'received PUSH request for {arr}')
             for c in arr:
                 if not c.key in self.data.keys():
                     self.data[c.key] = c
@@ -110,7 +108,7 @@ class CacheNode(Node):
         return response
 
     def save_data(self, cap):
-        log.warning("Saving url: " + cap.key)
+        logger.warning("Saving url: " + cap.key)
         self.dsem.acquire()
         self.data[cap.key] = cap
         #print(self.data)
@@ -119,7 +117,7 @@ class CacheNode(Node):
         def replicate(cap):
             for i, succ in enumerate(self.successors):
                 if i < 5:
-                    log.warning(f'data replicated to {succ.nodeID}')
+                    logger.warning(f'data replicated to {succ.nodeID}')
                     self.ssocket_send((PUSH, [cap]), succ, False)
 
         threading.Thread(target=replicate, args=(cap,)).start()
@@ -131,7 +129,7 @@ class CacheNode(Node):
 
     def pull(self):
         reply = self.ssocket_send((PULL, self.nodeID), self.successor)
-        log.warning(f'pulled {reply}')
+        logger.warning(f'pulled {reply}')
         if reply is None: return
         for c in reply:
             if not c.key in self.data.keys():
@@ -144,7 +142,7 @@ class CacheNode(Node):
                 succ = random.choice(self.successors)
                 arr = [c for c in self.data.values() if self.between(c.hash, p.nodeID + 1, self.nodeID + 1)]
                 if len(arr) > 0:
-                    log.warning(f'pushing to {succ}')
+                    logger.warning(f'pushing to {succ}')
                     self.ssocket_send((PUSH, arr), succ, False)
             time.sleep((len(self.successors) + 1) * 5)
 
