@@ -16,7 +16,6 @@ RETRANSMITS = 5
 THREADS = 5
 
 
-
 class Node:
 
     def __init__(self, portin=5000, serveraddress=None):

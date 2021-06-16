@@ -1,10 +1,8 @@
 import FlatServer
 import chordServer
-import logging
 import random
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import socket
-import pickle
 from urllib.parse import urlparse, unquote
 import urllib.request
 from html.parser import HTMLParser
@@ -72,7 +70,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
 
             self.__set_get_response()
             search, depth, domain = self.__parse_query__(query)
-            logging.warning(f'GET request for url: {search} in domain: {domain} with depth: {depth}')
+            logger.warning(f'GET request for url: {search} in domain: {domain} with depth: {depth}')
             html = self.__get_html_response__(search,depth,domain)
 
             s = '<!DOCTYPE html>' \
@@ -86,13 +84,13 @@ class HTTPHandler(BaseHTTPRequestHandler):
             items = ''
             for item in html:
                 #print('!!!!!!!!!!!!!', item, '!!!!!!!!!!!!!!!!')
-                #items += "<h1>URL: " + str(item) + " HTML </h1> "
+                items += "<h1 style = 'color: cornflowerblue'>URL: " + str(item) + " </h1> "
                 items += str(html[item])
             r = '</p>' \
                 '</form>' \
                 '</body>' \
                 '</html>'
-            self.wfile.write(pickle.dumps(s + items + r))
+            self.wfile.write((s + items + r).encode('utf-8'))
         else:
             self.__set_response()
             s = '<!DOCTYPE html>' \
@@ -102,16 +100,16 @@ class HTTPHandler(BaseHTTPRequestHandler):
                 '<title>Distributed Scrapy</title>' \
                 '</head>' \
                 '<body>' \
-                '<p>Insert URL to scrap</p>' \
+                '<h2>Insert URL to scrap</h2>' \
                 '<form id="MyForm" method="get">' \
-                'Search: <input type="url" name="search">' \
-                'Domain: <input type="text" name="domain">' \
-                'Depth: <input type="number" name="depth" min="1" max="5">' \
+                'URL: <input style="margin-right: 20px" required = "true"  type="url" name="search">' \
+                'Domain: <input style="margin-right: 20px" type="text" name="domain">' \
+                'Depth: <input style="margin-right: 20px" required = "true" type="number" name="depth" min="1" max="5">' \
                 '<input type="submit" value="Submit">' \
                 '</form>' \
                 '</body>' \
                 '</html>'
-            self.wfile.write(pickle.dumps(s))
+            self.wfile.write(s.encode('utf-8'))
 
 
 
@@ -188,10 +186,13 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
                     continue
                 try:
                     logger.error("SCRAPPING INTERNET")
-                    r = urllib.request.urlopen(url, timeout=30)
-                    print("1")
-                    x = r.read().decode('utf-8')
-                    print("2")
+                    with urllib.request.urlopen(url, timeout=15) as r:
+                        # if r.getcode() != 200:
+                        # answer[url] = "GET request returned code " + r.getcode()
+                        #    continue
+                        print("1")
+                        x = r.read().decode('utf-8')
+                        print("2")
                     parser.feed(x)
                     print("3")
                     answer[url] = x
