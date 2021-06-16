@@ -6,8 +6,8 @@ from constants import *
 import logging
 import time
 
-log = logging.Logger(name='Cache')
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format='%(funcName)s -at- %(threadName)s: %(message)s')
+log = logging.getLogger(__name__)
 
 class capsule:
     def __init__(self, key, hash, data):
@@ -67,25 +67,32 @@ class CacheNode(Node):
             hash = self.hash_string(key)
             log.warning("GET url request for:" + key)
 
-            node = self.lookup(hash)
-            if node == self.conn:
-                log.warning("I'm in charge of the url: " + key)
-                self.dsem.acquire()
-                try:
-                    text = self.data[key].data
-                    if text is None:
-                        text = 'Empty'
-                    else:
+            while True:
+                response = None
+                node = self.lookup(hash)
+
+                '''
+                if not self.ping(node.udp_address):
+                    time.sleep(5)
+                    continue
+                '''
+
+                if node == self.conn:
+                    log.warning("I'm in charge of the url: " + key)
+                    try:
+                        response = self.data[key].data
                         log.warning("I have  the url: " + key)
-                except KeyError:
-                    log.warning("I don't have the url: " + key)
-                    text = 'Empty'
-                self.dsem.release()
-            else:
-                log.warning(f"Sending GET_URL {key}   H: {hash} to node: {node.address}")
-                text = self.ssocket_send((GET_URL, key), node)
-            #log.warning("SENDING URL" + text[0:4])
-            response = text
+                    except KeyError:
+                        log.warning("I don't have the url: " + key)
+                        response = 'Empty'
+                    break
+                else:
+                    log.warning(f"Sending GET_URL {key}   H: {hash} to node: {node.address}")
+                    response = self.ssocket_send((GET_URL, key), node)
+                    if not response is None:
+                        break
+
+                #log.warning("SENDING URL" + text[0:4])
 
         if code == PULL:
             id = args[0]
@@ -110,12 +117,10 @@ class CacheNode(Node):
         self.dsem.release()
 
         def replicate(cap):
-            p = self.predecessor
-            if p is None or self.between(cap.hash, p.nodeID + 1, self.nodeID + 1):
-                for i, succ in enumerate(self.successors):
-                    if i < 3:
-                        log.warning(f'data replicated to {succ.nodeID}')
-                        self.ssocket_send((PUSH, [cap]), succ)
+            for i, succ in enumerate(self.successors):
+                if i < 5:
+                    log.warning(f'data replicated to {succ.nodeID}')
+                    self.ssocket_send((PUSH, [cap]), succ, False)
 
         threading.Thread(target=replicate, args=(cap,)).start()
 

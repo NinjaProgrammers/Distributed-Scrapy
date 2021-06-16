@@ -13,8 +13,8 @@ from constants import *
 import threading
 
 
-log = logging.Logger(name='Flat Server')
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+log = logging.getLogger(__name__)
 
 
 
@@ -152,7 +152,7 @@ class Broker(chordServer.node, FlatServer.Node, HTTPServer):
             if node is None:
                 send_response((None, None, None))
             else:
-                send_response((node.key, node.address, node.udp_address))
+                send_response((node.nodeID, node.address, node.udp_address))
 
         if code == ADD_GROUP:
             id, address, udp_address = args

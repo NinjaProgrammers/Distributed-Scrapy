@@ -7,28 +7,12 @@ import pickle
 import zmq
 import logging
 from constants import *
+from conn import conn
 
-log = logging.Logger(name='chord node')
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG, format='%(threadName)s: %(message)s')
+log = logging.getLogger(__name__)
 
 THREADS = 5
-
-class conn:
-    def __init__(self, id, address, udp_address):
-        self.nodeID = id
-        self.address = address
-        self.udp_address = udp_address
-
-    def __eq__(self, other):
-        return not other is None and self.nodeID == other.nodeID \
-               and self.address == other.address
-
-    def __str__(self):
-        return str(self.nodeID)
-
-    def __repr__(self):
-        return self.__str__()
-
 
 
 class Node:
@@ -44,6 +28,7 @@ class Node:
         self.lsock = self.context.socket(zmq.ROUTER)
         port = self.lsock.bind_to_random_port(f'tcp://{host}')
         self.listen_address = f'tcp://{host}:{port}'
+        self.lsock.identity = self.listen_address.encode('utf-8')
         log.warning(f'listening requests at {self.listen_address}')
 
         self.worker_address = f'inproc://workers{port}'
@@ -53,11 +38,12 @@ class Node:
             threading.Thread(target=self.worker, args=(self.worker_address,)).start()
 
 
-        self.ssem = threading.Semaphore()
-        self.ssock = self.context.socket(zmq.DEALER)
-        self.ssock.bind_to_random_port(f'tcp://{host}')
-        self.ssock.setsockopt(zmq.RCVTIMEO, 10000)
+        #self.ssem = threading.Semaphore()
+        #self.ssock = self.context.socket(zmq.ROUTER)
+        #self.ssock.bind_to_random_port(f'tcp://{host}')
+        #self.ssock.setsockopt(zmq.RCVTIMEO, 10000)
 
+        self.pisem = threading.Semaphore()
         self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sping.settimeout(1)
         self.spong = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -98,43 +84,47 @@ class Node:
                 exceptions.append(id)
 
         log.warning('starting daemons')
-        threading.Thread(target=self.stabilize_daemon).start()
-        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,)).start()
-        threading.Thread(target=self.pong).start()
-        threading.Thread(target=self.successors_daemon).start()
+        threading.Thread(target=self.stabilize_daemon, name='Stabilize').start()
+        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='Device').start()
+        threading.Thread(target=self.pong, name='PONG').start()
+        threading.Thread(target=self.successors_daemon, name='Successors').start()
 
     def send(self, msg, address):
         msg = pickle.dumps(msg)
-        self.ssem.acquire()
-        self.ssock.connect(address)
-        self.ssock.send(msg)
+        sock = self.context.socket(zmq.DEALER)
+        # self.sem.acquire()
+        sock.connect(address)
+        sock.send(msg)
         reply = None
         try:
-            reply = pickle.loads(self.ssock.recv())
+            reply = pickle.loads(sock.recv())
         except Exception as e:
             pass
-        self.ssock.disconnect(address)
-        self.ssem.release()
+        sock.disconnect(address)
+        # self.sem.release()
         return reply
 
-    def ssocket_send(self, msg, conn, WaitForReply=True):
+    def ssocket_send(self, msg, node, WaitForReply=True):
         msg = pickle.dumps(msg)
-        self.ssem.acquire()
-        self.ssock.connect(conn.address)
-        self.ssock.send(msg)
+        sock = self.context.socket(zmq.DEALER)
+        # self.sem.acquire()
+        sock.connect(node.address)
+        sock.setsockopt(zmq.RCVTIMEO, 1000)
+        sock.send(msg)
         reply = None
         while WaitForReply:
             try:
-                reply = pickle.loads(self.ssock.recv())
+                sock.send(msg)
+                reply = pickle.loads(sock.recv())
             except Exception as e:
                 pass
 
-            if reply is None and self.ping(conn.udp_address):
+            if reply is None and self.ping(node.udp_address):
                 continue
             else:
                 break
-        self.ssock.disconnect(conn.address)
-        self.ssem.release()
+        sock.disconnect(node.address)
+        # self.sem.release()
         return reply
 
     def pong(self):
@@ -148,20 +138,22 @@ class Node:
                 self.spong.sendto(reply, addr)
 
     def ping(self, address):
-        #log.warning(f'pinging {node}')
-        if address == self.listen_address: return True
+        log.warning(f'pinging {address}')
+        if address == self.udp_address: return True
         msg = pickle.dumps(PING)
         for i in range(3):
+            #self.pisem.acquire()
             self.sping.sendto(msg, address)
             try:
                 reply, addr = self.sping.recvfrom(1024)
             except Exception:
                 continue
+            #self.pisem.release()
             reply = pickle.loads(reply)
-            if reply == PONG:
-                #log.warning('received PONG response')
+            if reply == PONG and addr == address:
+                log.warning('received PONG response')
                 return True
-        #log.warning(f'pinging returned False')
+        log.warning(f'pinging returned False')
         return False
 
     def worker(self, worker_address):
@@ -188,20 +180,19 @@ class Node:
             response = self.predecessor
 
         if code == NOTIFY:
-            conn = args[0]
-            log.warning(f'received NOTIFY request for node {conn}')
-            self.notify(conn)
+            node = args[0]
+            log.warning(f'received NOTIFY request for node {node}')
+            self.notify(node)
 
         if code == LOOKUP:
             log.warning(f'received LOOKUP request')
-            conn = self.lookup(args[0])
-            response = conn
+            response = self.lookup(args[0])
 
         if code == FIND_PREDECESSOR:
-            #log.warning(f'received FIND_PREDECESSOR request')
-            conn = self.find_predecessor(args[0])
-            #log.warning(f'predecessor of {args[0]} is {conn}')
-            response = conn
+            log.warning(f'received FIND_PREDECESSOR request')
+            node = self.find_predecessor(args[0])
+            log.warning(f'predecessor of {args[0]} is {node}')
+            response = node
 
         return response
 
@@ -210,10 +201,10 @@ class Node:
     def conn(self):
         return conn(self.nodeID, self.listen_address, self.udp_address)
 
-    def _successor_(self, conn):
-        if conn == self.conn:
+    def _successor_(self, node):
+        if node == self.conn:
             return self.successor
-        return self.ssocket_send((SUCCESSOR, None), conn)
+        return self.ssocket_send((SUCCESSOR, None), node)
 
 
     @property
@@ -229,10 +220,10 @@ class Node:
         self.successors = [value]
         self.succsem.release()
 
-    def _predecessor_(self, conn):
-        if conn == self.conn:
+    def _predecessor_(self, node):
+        if node == self.conn:
             return self.predecessor
-        return self.ssocket_send((PREDECESSOR, None), conn)
+        return self.ssocket_send((PREDECESSOR, None), node)
 
     @property
     def predecessor(self):
@@ -262,14 +253,15 @@ class Node:
         log.warning(f'successor is {succ.nodeID}')
 
     def lookup(self, id):
+        log.warning(f'searching lookup for {id}')
         p = self.find_predecessor(id)
         if p is None: return self.conn
         ret = self._successor_(p)
         return ret
 
-    def _find_predecessor_(self, id, conn):
-        log.warning(f'calling remote predecessor for {id} to {conn}')
-        return self.ssocket_send((FIND_PREDECESSOR, id), conn)
+    def _find_predecessor_(self, id, node):
+        log.warning(f'calling remote predecessor for {id} to {node}')
+        return self.ssocket_send((FIND_PREDECESSOR, id), node)
 
     def find_predecessor(self, id):
         log.warning(f'trying to find predecessor of {id}')
@@ -315,6 +307,7 @@ class Node:
         self.ssocket_send((NOTIFY, node), conn, False)
 
     def notify(self, node):
+        log.warning(f'received notify from {node}')
         p = self.predecessor
         if p is None or not self.ping(p.udp_address) or self.between(node.nodeID,
             self.predecessor.nodeID + 1, self.nodeID):
@@ -322,6 +315,7 @@ class Node:
 
     def fix_finger(self):
         i = random.randint(2, self.NBits)
+        log.warning(f'fixing finger {i}')
         self.FTsem.acquire()
         self.FT[i] = self.lookup(self.start(i))
         self.FTsem.release()
@@ -333,21 +327,23 @@ class Node:
             time.sleep(2)
 
     def fix_successors(self):
-        if len(self.successors) == 0: return
-        if len(self.successors) < self.NBits:
-            if not self.ping(self.successor.udp_address):
+        log.warning('fixing successors')
+        if not self.ping(self.successor.udp_address):
+            if len(self.successors) > 0:
                 self.succsem.acquire()
                 self.successors.pop(0)
                 self.succsem.release()
-                self.FTsem.acquire()
-                if len(self.successors) > 0:
-                    self.FT[1] = self.successors[0]
-                else:
-                    self.FT[1] = self.conn
-                self.FTsem.release()
-                log.warning(f'Successors: {[i for i in self.successors]}')
-                return
 
+            self.FTsem.acquire()
+            if len(self.successors) > 0:
+                self.FT[1] = self.successors[0]
+            else:
+                self.FT[1] = self.conn
+            self.FTsem.release()
+            log.warning(f'Successors: {[i for i in self.successors]}')
+            return
+
+        if len(self.successors) > 0 and len(self.successors) < self.NBits:
             node = self.successors[-1]
             if node is None or not self.ping(node.udp_address):
                 self.succsem.acquire()
