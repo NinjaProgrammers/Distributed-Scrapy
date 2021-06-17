@@ -30,6 +30,6 @@ LOOKUP = 20
 FIND_PREDECESSOR = 21
 
 # Cache constants
-SAVE_URL = 22
-GET_URL = 23
+SAVE_DATA = 22
+GET_DATA = 23
 

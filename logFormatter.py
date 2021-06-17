@@ -7,7 +7,7 @@ class Formatter(logging.Formatter):
     red = '\x1b[31;21m'
     bold_red = '\x1b[31;1m'
     reset ='\x1b[0m'
-    format = '[%(name)s]--[%(threadName)s]: %(message)s]'
+    format = '[%(threadName)s] %(message)s'
     FORMATS = {
         logging.DEBUG: grey + format + reset,
         logging.INFO: green + format + reset,
