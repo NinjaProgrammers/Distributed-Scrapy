@@ -15,6 +15,8 @@ TRIES = 3
 RETRANSMITS = 5
 THREADS = 5
 
+REPLY = 1
+RESEND = 2
 
 class Node:
 
@@ -52,7 +54,7 @@ class Node:
 
         if serveraddress:
             address = f'tcp://{serveraddress[0]}:{serveraddress[1]}'
-            self.join(address)
+            self.join(address, (serveraddress[0], 5555))
         else:
             self.leaderID = self.nodeID = 0
             self.connections = [conn(self.nodeID, self.listen_address, self.udp_address)]
@@ -93,7 +95,7 @@ class Node:
         sock.disconnect(address)
         return reply
 
-    def ssocket_send(self, msg, node, WaitForReply=True):
+    def ssocket_send(self, msg, node, flags=0):
         logger.debug(f'[{self.nodeID}]: Sending message to {node}')
         msg = pickle.dumps(msg)
         sock = self.context.socket(zmq.DEALER)
@@ -101,9 +103,10 @@ class Node:
         sock.connect(node.address)
         sock.send(msg)
         reply = None
-        while WaitForReply:
+        while (flags & REPLY) > 0:
             try:
-                sock.send(msg)
+                if (flags & RESEND) > 0:
+                    sock.send(msg)
                 reply = pickle.loads(sock.recv())
             except Exception as e:
                 pass
@@ -113,7 +116,7 @@ class Node:
                 continue
             else:
                 break
-        if WaitForReply and reply is None:
+        if (flags & REPLY) > 0 and reply is None:
             logger.warning(f'[{self.nodeID}]: Didn\'t receive response from node {node.nodeID}')
         sock.disconnect(node.address)
         return reply
@@ -148,20 +151,23 @@ class Node:
         logger.warning(f'[{self.nodeID}]: Didn\'t receive PONG response')
         return False
 
-    def join(self, address):
+    def join(self, address, udp_address):
+        node = conn('unknown', address, udp_address)
         # message to join a group
         msg = (JOIN, self.listen_address, self.udp_address)
         logger.debug(f'Sending JOIN request to {address}')
-        reply = self.send(msg, address)
+        reply = self.ssocket_send(msg, node, REPLY)
 
         if reply is None:
             raise Exception('Cannot reach node')
+
         code, *args = reply
+        if code != ACCEPTED:
+            raise Exception(f'[{self.nodeID}]: Unrecognized message {code}, expected ACCEPTED')
 
-        if code != ACK:
-            raise Exception(f'[{self.nodeID}]: Unrecognized message {code}')
-
-        logger.debug(f'[{self.nodeID}]: Received ACK reply')
+        self.nodeID, data = args
+        self.manage_ACCEPTED(data)
+        logger.debug(f'[{self.nodeID}]: Received ACCEPTED reply')
 
 
     def worker(self, worker_address):
@@ -188,16 +194,10 @@ class Node:
 
         if code == JOIN:
             logger.debug(f'[{self.nodeID}]: Received JOIN request from {args[0]}')
-            send_response((ACK, None))
             # Accept new node in the group
             address, udp_address = args
-            self.manageJOIN(address, udp_address)
-
-        if code == NEW_NODE:
-            logger.debug(f'[{self.nodeID}]: Received NEW_NODE request for {args[0]}')
-            send_response((ACK, None))
-            address, udp_address = args
-            self.manageNEW_NODE(address, udp_address)
+            reply = self.manageJOIN(address, udp_address)
+            send_response(reply)
 
         if code == ADD_NODE:
             logger.debug(f'[{self.nodeID}]: Received ADD_NODE request for {args}')
@@ -248,53 +248,32 @@ class Node:
         node = self.getConnectionByAddress(address)
         if not node is None: node.active = False
 
-        if self.electionID != -1:
-            self.new_node_queue.append((address, udp_address))
-            return
+        join = (JOIN, address, udp_address)
+        while True:
+            while self.electionID != -1:
+                pass
 
-        # I am the coordinator
-        if self.leaderID == self.nodeID:
-            self.manageNEW_NODE(address, udp_address)
-            return
+            leader = self.leader
+            if leader.nodeID == self.nodeID:
+                if node is None:
+                    newID = len(self.connections)
+                    node = conn(newID, address, udp_address)
+                    self.connections.append(node)
 
-        node = self.leader
-        if not node.active:
-            self.new_node_queue.append((address, udp_address))
+                node.active = True
+                logger.debug(f'[{self.nodeID}]: Sending ACCEPTED response to {address}')
+                accepted = (ACCEPTED, node.nodeID, self.get_data())
+
+                addnode = (ADD_NODE, node.nodeID, address, udp_address)
+                self.broadcast(addnode, exc=[address])
+                return accepted
+
+            reply = self.ssocket_send(join, leader, REPLY)
+            if not reply is None:
+                return reply
+
             self.manageELECTION(self.nodeID)
-            return
 
-        # Tell coordinator node the new node address
-        new_node_message = (NEW_NODE, address, udp_address)
-
-        logger.debug(f'[{self.nodeID}]: Sending NEW_NODE request to {node} for {address}')
-        reply = self.ssocket_send(new_node_message, node)
-
-        if reply is None or reply[0] != ACK:
-            self.new_node_queue.append((address, udp_address))
-            self.manageELECTION(self.nodeID)
-        else:
-            logger.debug(f'[{self.nodeID}]: Received ACK reply')
-
-
-    def manageNEW_NODE(self, address, udp_address):
-        node = self.getConnectionByAddress(address)
-        if not node is None: node.active = False
-
-        if self.leaderID != self.nodeID:
-            return
-
-        if node is None:
-            newID = len(self.connections)
-            node = conn(newID, address, udp_address)
-            self.connections.append(node)
-
-        node.active = True
-        logger.debug(f'[{self.nodeID}]: Sending ACCEPTED response to {address}')
-        msg = (ACCEPTED, node.nodeID, self.get_data())
-        self.ssocket_send(msg, node, False)
-
-        msg = (ADD_NODE, node.nodeID, address, udp_address)
-        self.broadcast(msg, exc=[address])
 
     def manage_ACCEPTED(self, data):
         self.connections, self.leaderID = data
@@ -309,7 +288,7 @@ class Node:
         for node in self.connections:
             if node.address not in exc:
                 logger.debug(f'[{self.nodeID}]: Broadcasting to {node.address}')
-                self.ssocket_send(msg, node, False)
+                self.ssocket_send(msg, node)
 
     def manageELECTION(self, electionID):
         '''
@@ -324,7 +303,7 @@ class Node:
         msg = (ELECTION, self.electionID)
         lastBully = None
         for node in [i for i in self.connections if i.nodeID > self.nodeID and i.active]:
-            reply = self.ssocket_send(msg, node)
+            reply = self.ssocket_send(msg, node, REPLY)
             if not reply is None and (lastBully is None or lastBully.nodeID < node.nodeID):
                 logger.debug(f'[{self.nodeID}]: Received bully response from {node.nodeID}')
                 lastBully = node
@@ -337,13 +316,13 @@ class Node:
             for node in self.connections:
                 if node.address != self.listen_address:
                     logger.debug(f'[{self.nodeID}]: sending COORDINATOR request to {node.address}')
-                    self.ssocket_send(msg, node, False)
+                    self.ssocket_send(msg, node)
             self.electionID = -1
             for (address, udp_address) in self.new_node_queue:
                 self.manageNEW_NODE(address, udp_address)
         else:
             for (address, udp_address) in self.new_node_queue:
-                self.ssocket_send((JOIN, address, udp_address), lastBully, False)
+                self.ssocket_send((JOIN, address, udp_address), lastBully)
 
 
     def missing(self):
@@ -383,7 +362,7 @@ class Node:
                     missing = self.missing()
                     logger.debug(f'[{self.nodeID}]: Sending PULL request to {node.nodeID} for {missing}')
                     msg = (PULL, missing)
-                    reply = self.ssocket_send(msg, node)
+                    reply = self.ssocket_send(msg, node, REPLY)
 
                     if not reply is None:
                         code, node, leader = reply

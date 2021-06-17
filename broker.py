@@ -52,7 +52,7 @@ class Broker(chordServer.node, FlatServer.Node,ThreadingMixIn):
             arr.remove(c)
 
             logger.debug("Sending GET_DATA for " + key + " to node " + c.address)
-            reply = self.ssocket_send((GET_DATA, key), c)
+            reply = self.ssocket_send((GET_DATA, key), c, FlatServer.REPLY | FlatServer.RESEND)
             if reply is None:
                 c.active = False
                 continue
@@ -67,7 +67,7 @@ class Broker(chordServer.node, FlatServer.Node,ThreadingMixIn):
             arr.remove(c)
 
             logger.debug(f"Sending SAVE_DATA for {key} to node {c.address}" )
-            reply = self.ssocket_send((SAVE_DATA, key, data), c)
+            reply = self.ssocket_send((SAVE_DATA, key, data), c, FlatServer.REPLY)
             if reply is None or reply != ACK:
                 c.active = False
                 continue
