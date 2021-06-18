@@ -46,6 +46,10 @@ class Broker(chordServer.node, FlatServer.Node,ThreadingMixIn):
         self.connections, self.leaderID, self.nodes = data
 
     def __get_cache_data__(self, key):
+        '''
+        Get data corresponding to key from cache if it is stored
+        :param key: Key of the data
+        '''
         arr = [i for i in self.nodes]
         while len(arr) > 0:
             c = random.choice(arr)
@@ -61,6 +65,11 @@ class Broker(chordServer.node, FlatServer.Node,ThreadingMixIn):
         return "Empty"
 
     def __save_cache_data__(self, key, data):
+        '''
+        Stores data in cache with its corresponding key
+        :param key: Key corresponding to data
+        :param data: Data to store
+        '''
         arr = [i for i in self.nodes]
         while len(arr) > 0:
             c = random.choice(arr)

@@ -64,8 +64,8 @@ class Node:
 
         # Asking for initial existing chord node to connect to
         exceptions = [self.nodeID]
-        logger.debug(f'Getting random chord node to connect to')
         while True:
+            logger.debug(f'Getting random chord node to connect to')
             reply = self.ssocket_send((RANDOM_NODE, exceptions), server_node, REPLY)
             if reply is None:
                 raise Exception('server not responding')
@@ -75,7 +75,6 @@ class Node:
                 break
 
             node = conn(id, address, udp_address)
-            logger.info(f'Joining node {id}')
             if self.join(node):
                 break
             else:
@@ -131,8 +130,11 @@ class Node:
         :param node: Object that stores the fields address and udp_address of the listening node
         :return: True or False if join was successful
         '''
+        logger.info(f'Joining node {node}')
         succ = self.ssocket_send((LOOKUP, (self.nodeID + 1) %  self.MAXNodes), node, REPLY)
-        if succ is None: return False
+        if succ is None:
+            logger.warning('Joining was not successful')
+            return False
         self.successor = succ
         self._notify_(self.conn, succ)
         logger.info(f'Node\'s successor is {succ.nodeID}')
@@ -256,7 +258,7 @@ class Node:
         self.successors = [value]
         self.succsem.release()
 
-    def _predecessor_(self, node) -> conn:
+    def _predecessor_(self, node: conn) -> conn:
         '''
         Asks for predecessor of other chord node
         :param node: Other node conn object
@@ -379,9 +381,10 @@ class Node:
         Daemon for fixing node's successor and node's fingers
         '''
         while True:
-            logger.debug(f'Stabilizing')
             time.sleep((len(self.successors) + 1) * 3)
+            logger.debug(f'Stabilizing')
             self.stabilize()
+            logger.debug(f'Fixing finger')
             self.fix_finger()
             logger.info(f'FT[{self.nodeID}]={[i for i in self.FT]}')
 
@@ -433,6 +436,7 @@ class Node:
                 self.FT[1] = self.successors[0]
             else:
                 self.FT[1] = self.conn
+                self.FT[0] = None
             self.FTsem.release()
 
             logger.info(f'New successor is {self.successor}')
