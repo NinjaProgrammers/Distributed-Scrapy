@@ -10,7 +10,8 @@ from constants import *
 from conn import conn
 
 THREADS = 5
-
+REPLY = 1
+RESEND = 2
 
 class Node:
     def __init__(self, dns):
@@ -20,30 +21,34 @@ class Node:
         host = socket.gethostname()
         host = socket.gethostbyname(host)
 
+        # Opening zmq sockets
         self.context = zmq.Context()
-
         self.lsock = self.context.socket(zmq.ROUTER)
         port = self.lsock.bind_to_random_port(f'tcp://{host}')
         self.listen_address = f'tcp://{host}:{port}'
-        logger.debug(f'Listening TCP requests at {self.listen_address}')
+        logger.info(f'Listening TCP requests at {self.listen_address}')
 
+        # Opening zmq inproc sockets
         self.worker_address = f'inproc://workers{port}'
         self.wsock = self.context.socket(zmq.DEALER)
         self.wsock.bind(self.worker_address)
         for i in range(THREADS):
             threading.Thread(target=self.worker, args=(self.worker_address,)).start()
 
+        # Opening UDP sockets for PING PONG messages
         self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sping.settimeout(1)
         self.spong = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.spong.bind((host, 0))
         self.udp_address = self.spong.getsockname()
-        logger.debug(f'Listening UDP requests at {self.udp_address}')
+        logger.info(f'Listening UDP requests at {self.udp_address}')
 
-
+        # Connecting to server
         server = f'tcp://{self.dns[0]}:{self.dns[1]}'
-        logger.debug(f'Joining to server at {server}')
-        reply = self.send((JOIN_GROUP, self.listen_address, self.udp_address), server)
+        udp_server = (self.dns[0], 5555)
+        server_node = conn('unknown', server, udp_server)
+        logger.info(f'Joining to server at {server}')
+        reply = self.ssocket_send((JOIN_GROUP, self.listen_address, self.udp_address), server_node, REPLY)
         if reply is None:
             raise Exception('Server not responding')
         self.nodeID, self.NBits = reply
@@ -51,61 +56,60 @@ class Node:
         self.FTsem = threading.Semaphore()
         self.FT = [self.conn for _ in range(self.NBits + 1)]
         self.predecessor = None
+        logger.info(f'Node started with ID {self.nodeID}')
 
+        # Initializing successors list, neccessary for keeping nodes stability
         self.succsem = threading.Semaphore()
         self.successors = []
 
-        logger.debug(f'Node started with ID {self.nodeID}')
+        # Asking for initial existing chord node to connect to
         exceptions = [self.nodeID]
         logger.debug(f'Getting random chord node to connect to')
         while True:
-            reply = self.send((RANDOM_NODE, exceptions), server)
+            reply = self.ssocket_send((RANDOM_NODE, exceptions), server_node, REPLY)
             if reply is None:
                 raise Exception('server not responding')
             id, address, udp_address = reply
             if address is None:
-                logger.debug('There is no other nodes, starting alone')
+                logger.info('There is no other nodes, starting alone')
                 break
-            logger.debug(f'Joining node {id}')
 
-            if self.ping(udp_address):
-                node = conn(id, address, udp_address)
-                self.join(node)
+            node = conn(id, address, udp_address)
+            logger.info(f'Joining node {id}')
+            if self.join(node):
                 break
             else:
                 exceptions.append(id)
 
+        # Starting demons
         logger.debug('Starting daemons')
         threading.Thread(target=self.stabilize_daemon, name='ThreadStabilize').start()
         threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='ThreadDevice').start()
         threading.Thread(target=self.pong, name='PONG').start()
         threading.Thread(target=self.successors_daemon, name='ThreadSuccessors').start()
 
-    def send(self, msg, address):
-        msg = pickle.dumps(msg)
-        sock = self.context.socket(zmq.DEALER)
-        sock.setsockopt(zmq.RCVTIMEO, 1000)
-        sock.connect(address)
-        sock.send(msg)
-        reply = None
-        try:
-            reply = pickle.loads(sock.recv())
-        except Exception as e:
-            pass
-        sock.disconnect(address)
-        return reply
-
-    def ssocket_send(self, msg, node, WaitForReply=True):
-        logger.debug(f'Sending message to node {node.nodeID}')
+    def ssocket_send(self, msg, node: conn, flags: int =0):
+        '''
+        Sends a message to node.address through TCP zmq DEALER sockets,
+        uses REPLY and RESEND flags to know if wait for answer and if resend
+        the message several times while waiting for it respectivily
+        :param msg: Message to send
+        :param node: Object that stores the fields address and udp_address of the listening node
+        :param flags: Possible flags are REPLY = 1 and RESEND = 2
+        :return: Listening node answer if REPLY flag was activated and node is running,
+        None in any other case
+        '''
+        logger.debug(f'Sending message to {node}')
         msg = pickle.dumps(msg)
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt(zmq.RCVTIMEO, 1000)
         sock.connect(node.address)
         sock.send(msg)
         reply = None
-        while WaitForReply:
+        while (flags & REPLY) > 0:
             try:
-                sock.send(msg)
+                if (flags & RESEND) > 0:
+                    sock.send(msg)
                 reply = pickle.loads(sock.recv())
             except Exception as e:
                 pass
@@ -115,12 +119,29 @@ class Node:
                 continue
             else:
                 break
+        if (flags & REPLY) > 0 and reply is None:
+            logger.warning(f'Didn\'t receive response from node {node}')
         sock.disconnect(node.address)
-        if WaitForReply and reply is None:
-            logger.warning(f'Didn\'t receive response from node {node.nodeID}')
         return reply
 
-    def pong(self):
+    def join(self, node: conn) -> bool:
+        '''
+        Try to join to node.address using node.udp_address to send PING messages
+        to know if node is running
+        :param node: Object that stores the fields address and udp_address of the listening node
+        :return: True or False if join was successful
+        '''
+        succ = self.ssocket_send((LOOKUP, (self.nodeID + 1) %  self.MAXNodes), node, REPLY)
+        if succ is None: return False
+        self.successor = succ
+        self._notify_(self.conn, succ)
+        logger.info(f'Node\'s successor is {succ.nodeID}')
+        return True
+
+    def pong(self) -> None:
+        '''
+        Daemon for listening PING request via a UDP socket
+        '''
         while True:
             msg, addr = self.spong.recvfrom(1024)
             if not msg: continue
@@ -130,7 +151,13 @@ class Node:
                 reply = pickle.dumps(PONG)
                 self.spong.sendto(reply, addr)
 
-    def ping(self, address):
+    def ping(self, address: tuple) -> bool:
+        '''
+        Send a PING message to an address, return True or False
+        if PONG response was received
+        :param address: Address to PING
+        :return: True or False if PONG response was received
+        '''
         logger.debug(f'Sending PING to {address}')
         if address == self.udp_address: return True
         msg = pickle.dumps(PING)
@@ -147,7 +174,11 @@ class Node:
         logger.warning(f'Not received PONG response')
         return False
 
-    def worker(self, worker_address):
+    def worker(self, worker_address: str) -> None:
+        '''
+        Daemon for managing incoming requests
+        :param worker_address: Inproc address to connect to
+        '''
         sock = self.context.socket(zmq.ROUTER)
         sock.connect(worker_address)
 
@@ -158,7 +189,12 @@ class Node:
             bits = pickle.dumps(response)
             sock.send_multipart([ident1, ident2, bits])
 
-    def manage_request(self, data):
+    def manage_request(self, data: tuple):
+        '''
+        Manage the incoming request
+        :param data: Request to process
+        :return: Request's answer
+        '''
         code, *args = data
         response = None
 
@@ -187,17 +223,28 @@ class Node:
 
 
     @property
-    def conn(self):
+    def conn(self) -> conn:
+        '''
+        conn object of the current node
+        '''
         return conn(self.nodeID, self.listen_address, self.udp_address)
 
-    def _successor_(self, node):
+    def _successor_(self, node: conn) -> conn:
+        '''
+        Asks for successor of other chord node
+        :param node: Other node conn object
+        :return: Successor's conn object
+        '''
         if node == self.conn:
             return self.successor
-        return self.ssocket_send((SUCCESSOR, None), node)
+        return self.ssocket_send((SUCCESSOR, None), node, REPLY)
 
 
     @property
-    def successor(self):
+    def successor(self) -> conn:
+        '''
+        Node's successor
+        '''
         return self.FT[1]
 
     @successor.setter
@@ -209,13 +256,21 @@ class Node:
         self.successors = [value]
         self.succsem.release()
 
-    def _predecessor_(self, node):
+    def _predecessor_(self, node) -> conn:
+        '''
+        Asks for predecessor of other chord node
+        :param node: Other node conn object
+        :return: Predecessor's conn object
+        '''
         if node == self.conn:
             return self.predecessor
-        return self.ssocket_send((PREDECESSOR, None), node)
+        return self.ssocket_send((PREDECESSOR, None), node, REPLY)
 
     @property
-    def predecessor(self):
+    def predecessor(self) -> conn:
+        '''
+        Node's Predecessor
+        '''
         return self.FT[0]
 
     @predecessor.setter
@@ -224,34 +279,61 @@ class Node:
         self.FT[0] = value
         self.FTsem.release()
 
-    def start(self, i):
+    def start(self, i: int) -> int:
+        '''
+        Compute id of (i-1)-th finger
+        :param i: Finger's index
+        :return: (nodeID + 2**(i-1))
+        '''
         return (self.nodeID + (1<<(i - 1))) % self.MAXNodes
 
-    def finger(self, i):
+    def finger(self, i) -> conn:
+        '''
+        conn object of node's (i-1)-th finger
+        :param i: Finger's index
+        :return: conn object
+        '''
         return self.FT[i]
 
-    # Says if node id is in range [a,b)
-    def between(self, id, a, b):
+    def between(self, id, a, b) -> bool:
+        '''
+        Says if id is between a and b in current chord ring
+        :param id: int
+        :param a: int
+        :param b: int
+        :return: bool
+        '''
         if a < b: return id >= a and id < b
         return id >= a or id < b
 
-    def join(self, node):
-        succ = self.ssocket_send((LOOKUP, (self.nodeID + 1) %  self.MAXNodes), node)
-        self.successor = succ
-        self._notify_(self.conn, succ)
-        logger.debug(f'Node\'s successor is {succ.nodeID}')
 
-    def lookup(self, id):
+    def lookup(self, id: int) -> conn:
+        '''
+        Search for node responsible for key id
+        :param id: int
+        :return: conn
+        '''
         p = self.find_predecessor(id)
         if p is None: return self.conn
         ret = self._successor_(p)
         return ret
 
-    def _find_predecessor_(self, id, node):
+    def _find_predecessor_(self, id: int, node: conn) -> conn:
+        '''
+        Asks remote chord node to find predecessor of key id
+        :param id: int
+        :param node: conn
+        :return: conn
+        '''
         logger.debug(f'Asking {node} for predecessor of {id}')
-        return self.ssocket_send((FIND_PREDECESSOR, id), node)
+        return self.ssocket_send((FIND_PREDECESSOR, id), node, REPLY)
 
-    def find_predecessor(self, id):
+    def find_predecessor(self, id: int) -> conn:
+        '''
+        Finds predecessor of key id
+        :param id: int
+        :return: conn
+        '''
         succ = self.successor
         if succ is None or self.between(id, self.nodeID + 1, succ.nodeID + 1):
             return self.conn
@@ -260,7 +342,12 @@ class Node:
             return cur
         return self._find_predecessor_(id, cur)
 
-    def closest_preceding_finger(self, id):
+    def closest_preceding_finger(self, id: int) -> conn:
+        '''
+        Return closest preceding finger of key id in node's Finger Table
+        :param id: int
+        :return: conn
+        '''
         for i in range(self.NBits, 0, -1):
             f = self.finger(i)
             if f is None: continue
@@ -268,17 +355,29 @@ class Node:
                 return f
         return self.conn
 
-    def _notify_(self, node, conn):
+    def _notify_(self, node: conn, conn: conn):
+        '''
+        Notifies remote node that current node may be his predecessor
+        :param node: Current node conn object
+        :param conn: Remote node conn object
+        '''
         logger.debug(f'Sending NOTIFY to {conn}')
-        self.ssocket_send((NOTIFY, node), conn, False)
+        self.ssocket_send((NOTIFY, node), conn)
 
-    def notify(self, node):
+    def notify(self, node: conn):
+        '''
+        Checks if node can be the predecessor of current node
+        :param node: Remote node conn object
+        '''
         p = self.predecessor
         if p is None or not self.ping(p.udp_address) or self.between(node.nodeID,
             self.predecessor.nodeID + 1, self.nodeID):
             self.predecessor = node
 
     def stabilize_daemon(self):
+        '''
+        Daemon for fixing node's successor and node's fingers
+        '''
         while True:
             logger.debug(f'Stabilizing')
             time.sleep((len(self.successors) + 1) * 3)
@@ -287,6 +386,9 @@ class Node:
             logger.info(f'FT[{self.nodeID}]={[i for i in self.FT]}')
 
     def stabilize(self):
+        '''
+        Fix node's successor
+        '''
         succ = self.successor
         p = self._predecessor_(succ)
         if not p is None:
@@ -297,19 +399,28 @@ class Node:
                 self._notify_(self.conn, p)
 
     def fix_finger(self):
+        '''
+        Fix random node's finger
+        '''
         i = random.randint(2, self.NBits)
         self.FTsem.acquire()
         self.FT[i] = self.lookup(self.start(i))
         self.FTsem.release()
 
     def successors_daemon(self):
+        '''
+        Daemon to fix and maintain successors list, useful for updating
+        current node's successor when it not responding PING requests
+        '''
         while True:
             logger.debug('Fixing successors')
             self.fix_successors()
             time.sleep(2)
 
     def fix_successors(self):
-
+        '''
+        Maintains successors list up to date
+        '''
         if not self.ping(self.successor.udp_address):
             logger.warning(f'Successor is unreachable')
             if len(self.successors) > 0:
@@ -323,6 +434,8 @@ class Node:
             else:
                 self.FT[1] = self.conn
             self.FTsem.release()
+
+            logger.info(f'New successor is {self.successor}')
             return
 
         if len(self.successors) > 0 and len(self.successors) < self.NBits:
@@ -337,9 +450,6 @@ class Node:
                 self.succsem.acquire()
                 self.successors.append(new)
                 self.succsem.release()
-
-
-
 
 
 if __name__ == '__main__':

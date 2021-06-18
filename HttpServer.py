@@ -120,7 +120,7 @@ class HttpServer(HTTPServer):
         host = socket.gethostname()
         host = socket.gethostbyname(host)
         address = (host, port)
-        logger.info(f'Running HTTP server in http://{host}:{port}')
+        logger.info(f'Running HTTP server at http://{host}:{port}')
         HTTPServer.__init__(self, address, handler)
 
     def get_html(self, url, domain, depth):

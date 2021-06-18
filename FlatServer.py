@@ -21,18 +21,17 @@ RESEND = 2
 class Node:
 
     def __init__(self, portin=5000, serveraddress=None):
-        # My Address
         hostname = socket.gethostname()
         self.host = socket.gethostbyname(hostname)
 
-        # Socket to listen requests from other nodes
+        # Starting zmq sockets
         self.context = zmq.Context()
-
         self.lsock = self.context.socket(zmq.ROUTER)
         self.listen_address = f'tcp://{self.host}:{portin}'
         self.lsock.bind(self.listen_address)
         logger.info(f'Receiving incoming TCP communications at {self.listen_address}')
 
+        # Starting zmq inproc sockets
         self.worker_address = f'inproc://workers{portin}'
         self.wsock = self.context.socket(zmq.DEALER)
         self.wsock.bind(self.worker_address)
@@ -44,7 +43,7 @@ class Node:
         self.nodeID = -1
         self.connections = []
 
-        # Ping-Pong sockets
+        # Starting UDP sockets for PING PONG messages
         self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sping.settimeout(1)
         self.spong = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -52,6 +51,7 @@ class Node:
         self.udp_address = self.spong.getsockname()
         logger.info(f"Receiving incoming UDP communications at {self.udp_address}")
 
+        # Trying to connect to another flat server node
         if serveraddress:
             address = f'tcp://{serveraddress[0]}:{serveraddress[1]}'
             self.join(address, (serveraddress[0], 5555))
@@ -69,34 +69,43 @@ class Node:
 
     @property
     def leader(self):
+        '''
+        Leader conn object
+        '''
         return self.getConnectionByID(self.leaderID)
 
-    def getConnectionByAddress(self, address):
+    def getConnectionByAddress(self, address: str) -> conn:
+        '''
+        Get the conn object that corresponds to certain address
+        :param address: Address of the node
+        :return: conn oject
+        '''
         arr = [i for i in self.connections if i.address == address]
         if len(arr) == 0: return None
         return arr[0]
 
-    def getConnectionByID(self, ID):
+    def getConnectionByID(self, ID: int) -> conn:
+        '''
+        Get the conn object that corresponds to certain id
+        :param ID: Id of the node
+        :return: conn oject
+        '''
         arr = [i for i in self.connections if i.nodeID == ID]
         if len(arr) == 0: return None
         return arr[0]
 
-    def send(self, msg, address):
-        msg = pickle.dumps(msg)
-        sock = self.context.socket(zmq.DEALER)
-        sock.setsockopt(zmq.RCVTIMEO, 1000)
-        sock.connect(address)
-        sock.send(msg)
-        reply = None
-        try:
-            reply = pickle.loads(sock.recv())
-        except Exception as e:
-            pass
-        sock.disconnect(address)
-        return reply
-
-    def ssocket_send(self, msg, node, flags=0):
-        logger.debug(f'[{self.nodeID}]: Sending message to {node}')
+    def ssocket_send(self, msg, node: conn, flags: int =0):
+        '''
+        Sends a message to node.address through TCP zmq DEALER sockets,
+        uses REPLY and RESEND flags to know if wait for answer and if resend
+        the message several times while waiting for it respectivily
+        :param msg: Message to send
+        :param node: Object that stores the fields address and udp_address of the listening node
+        :param flags: Possible flags are REPLY = 1 and RESEND = 2
+        :return: Listening node answer if REPLY flag was activated and node is running,
+        None in any other case
+        '''
+        logger.debug(f'[{self.nodeID}]: Sending message to {node.address}')
         msg = pickle.dumps(msg)
         sock = self.context.socket(zmq.DEALER)
         sock.setsockopt(zmq.RCVTIMEO, 1000)
@@ -117,11 +126,14 @@ class Node:
             else:
                 break
         if (flags & REPLY) > 0 and reply is None:
-            logger.warning(f'[{self.nodeID}]: Didn\'t receive response from node {node.nodeID}')
+            logger.warning(f'[{self.nodeID}]: Didn\'t receive response from node {node.address}')
         sock.disconnect(node.address)
         return reply
 
     def pong(self):
+        '''
+        Daemon for listening PING request via a UDP socket
+        '''
         while True:
             try:
                 msg, addr = self.spong.recvfrom(1024)
@@ -134,7 +146,13 @@ class Node:
                 reply = pickle.dumps(PONG)
                 self.spong.sendto(reply, addr)
 
-    def ping(self, address):
+    def ping(self, address: tuple):
+        '''
+        Send a PING message to an address, return True or False
+        if PONG response was received
+        :param address: Address to PING
+        :return: True or False if PONG response was received
+        '''
         logger.debug(f'[{self.nodeID}]: Sending PING to {address}')
         if address == self.udp_address: return True
         msg = pickle.dumps(PING)
@@ -151,7 +169,13 @@ class Node:
         logger.warning(f'[{self.nodeID}]: Didn\'t receive PONG response')
         return False
 
-    def join(self, address, udp_address):
+    def join(self, address: str, udp_address: tuple):
+        '''
+        Try to join to address using udp_address to send PING messages
+        to know if node is running
+        :param address: Address of the listening node
+        :param udp_address: UDP address of the listening node
+        '''
         node = conn('unknown', address, udp_address)
         # message to join a group
         msg = (JOIN, self.listen_address, self.udp_address)
@@ -170,7 +194,11 @@ class Node:
         logger.debug(f'[{self.nodeID}]: Received ACCEPTED reply')
 
 
-    def worker(self, worker_address):
+    def worker(self, worker_address: str):
+        '''
+        Daemon for managing incoming requests
+        :param worker_address: Inproc address to connect to
+        '''
         sock = self.context.socket(zmq.ROUTER)
         sock.connect(worker_address)
 
@@ -188,6 +216,11 @@ class Node:
 
 
     def manage_request(self, send_response, data):
+        '''
+        Manage the incoming request
+        :param send_response: function to send responses
+        :param data: Request to process
+        '''
         code, *args = data
         if self.nodeID < 0 and code != ACCEPTED:
             return
@@ -234,17 +267,18 @@ class Node:
 
         if code == PULL:
             logger.debug(f'[{self.nodeID}]: Received PULL request from {args[0]}')
-            ans = self.managePULL(args[0])
+            ans = self.getConnectionByID(args[0])
             msg = (PUSH, ans , self.leaderID)
             send_response(msg)
 
 
-    def managePULL(self, node):
-        item = self.getConnectionByID(node)
-        return item
-
-    # address is the listening address of the socket connecting
-    def manageJOIN(self, address, udp_address):
+    def manageJOIN(self, address: str, udp_address: tuple):
+        '''
+        Manage JOIN requests
+        :param address: TCP address of the node that sends the request
+        :param udp_address: UDP address of the node that sends the request
+        :return: ACCEPTED response
+        '''
         node = self.getConnectionByAddress(address)
         if not node is None: node.active = False
 
@@ -276,12 +310,24 @@ class Node:
 
 
     def manage_ACCEPTED(self, data):
+        '''
+        Manage ACCEPTED response data
+        '''
         self.connections, self.leaderID = data
 
     def get_data(self):
+        '''
+        Get the data required for responding PULL messages
+        :return:
+        '''
         return [self.connections, self.nodeID]
 
     def broadcast(self, msg, exc=None):
+        '''
+        Broadcast messages to all nodes not in exc
+        :param msg: Message to broadcast
+        :param exc: Exception nodes
+        '''
         if exc is None: exc = []
         exc.append(self.listen_address)
 
@@ -290,10 +336,9 @@ class Node:
                 logger.debug(f'[{self.nodeID}]: Broadcasting to {node.address}')
                 self.ssocket_send(msg, node)
 
-    def manageELECTION(self, electionID):
+    def manageELECTION(self, electionID: int):
         '''
         Starts an election procedure
-        :return: None
         '''
         if self.electionID != -1: return
         self.electionID = electionID
@@ -319,13 +364,17 @@ class Node:
                     self.ssocket_send(msg, node)
             self.electionID = -1
             for (address, udp_address) in self.new_node_queue:
-                self.manageNEW_NODE(address, udp_address)
+                self.manageJOIN(address, udp_address)
         else:
             for (address, udp_address) in self.new_node_queue:
                 self.ssocket_send((JOIN, address, udp_address), lastBully)
 
 
-    def missing(self):
+    def missing(self) -> int:
+        '''
+        Get the id of a node that may not be in current connections list
+        :return: Id of the node
+        '''
         self.connections.sort()
         node = len(self.connections)
         for i, item in enumerate(self.connections):
@@ -334,6 +383,10 @@ class Node:
         return node
 
     def pingingDaemon(self):
+        '''
+        Daemon for send PING requests to random nodes and PULL information from them
+        :return:
+        '''
         while True:
             seq = [i for i in self.connections if i.nodeID != self.nodeID and i.active]
             if len(self.connections) > 0 and len(seq) == 0:
@@ -342,7 +395,7 @@ class Node:
                 node = random.choice(self.connections)
                 if node.address != self.listen_address:
                     try:
-                        self.join(node.address)
+                        self.join(node.address, node.udp_address)
                         node.active = True
                     except Exception as e:
                         pass
