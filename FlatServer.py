@@ -112,7 +112,9 @@ class Node:
         sock.connect(node.address)
         sock.send(msg)
         reply = None
-        while (flags & REPLY) > 0:
+        retransmits = 0
+        while (flags & REPLY) > 0 and retransmits < 30:
+            retransmits += 1
             try:
                 if (flags & RESEND) > 0:
                     sock.send(msg)
@@ -248,8 +250,10 @@ class Node:
             self.manageELECTION(args[0])
 
         if code == COORDINATOR:
-            logger.info(f'[{self.nodeID}]: Received COORDINATOR response from node {args[0]}')
             send_response((ACK, None))
+            node = self.getConnectionByID(args[0])
+            if node is None: return
+            logger.info(f'[{self.nodeID}]: Received COORDINATOR response from node {args[0]}')
             if args[0] < self.leaderID: return
             self.leaderID = args[0]
             self.electionID = -1
@@ -401,35 +405,35 @@ class Node:
                         pass
 
 
-            if len(seq) != 0:
-                node = random.choice(seq)
+            if len(self.connections) > 1:
+                node = random.choice(self.connections)
+                if node.nodeID != self.nodeID:
+                    if not self.ping(node.udp_address):
+                        node.active = False
+                        if node.nodeID == self.leaderID:
+                            self.manageELECTION(self.nodeID)
 
-                if not self.ping(node.udp_address):
-                    node.active = False
-                    if node.nodeID == self.leaderID:
-                        self.manageELECTION(self.nodeID)
+                    else:
+                        node.active = True
 
-                else:
-                    node.active = True
+                        missing = self.missing()
+                        logger.debug(f'[{self.nodeID}]: Sending PULL request to {node.nodeID} for {missing}')
+                        msg = (PULL, missing)
+                        reply = self.ssocket_send(msg, node, REPLY)
 
-                    missing = self.missing()
-                    logger.debug(f'[{self.nodeID}]: Sending PULL request to {node.nodeID} for {missing}')
-                    msg = (PULL, missing)
-                    reply = self.ssocket_send(msg, node, REPLY)
+                        if not reply is None:
+                            code, node, leader = reply
 
-                    if not reply is None:
-                        code, node, leader = reply
+                            if code == PUSH:
+                                logger.debug(f'[{self.nodeID}]: Received PUSH response')
 
-                        if code == PUSH:
-                            logger.debug(f'[{self.nodeID}]: Received PUSH response')
+                                if not node is None:
+                                    temp = self.getConnectionByID(node.nodeID)
+                                    if temp is None:
+                                        self.connections.append(node)
 
-                            if not node is None:
-                                temp = self.getConnectionByID(node.nodeID)
-                                if not temp is None:
-                                    self.connections.append(node)
-
-                            if leader != self.leaderID:
-                                self.manageELECTION(self.nodeID)
+                                if leader != self.leaderID:
+                                    self.manageELECTION(self.nodeID)
 
             time.sleep((len(self.connections) + 1) * 3)
 

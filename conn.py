@@ -2,12 +2,15 @@
 
 
 class conn:
-    def __init__(self, nodeID, address, udp_address):
+    def __init__(self, nodeID=None, address=None, udp_address=None):
         self.nodeID = nodeID
         self.address = address
         self.udp_address = udp_address
-        self.retransmits = 0
         self.active = True
+
+    @property
+    def is_valid(self):
+        return not self.nodeID is None
 
     def __eq__(self, other):
         return not other is None and self.nodeID == other.nodeID \

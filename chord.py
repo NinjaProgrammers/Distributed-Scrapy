@@ -55,7 +55,7 @@ class Node:
         self.MAXNodes = (1 << self.NBits)
         self.FTsem = threading.Semaphore()
         self.FT = [self.conn for _ in range(self.NBits + 1)]
-        self.predecessor = None
+        self.predecessor = conn()
         logger.info(f'Node started with ID {self.nodeID}')
 
         # Initializing successors list, neccessary for keeping nodes stability
@@ -105,7 +105,9 @@ class Node:
         sock.connect(node.address)
         sock.send(msg)
         reply = None
-        while (flags & REPLY) > 0:
+        retransmits = 0
+        while (flags & REPLY) > 0 and retransmits < 30:
+            retransmits += 1
             try:
                 if (flags & RESEND) > 0:
                     sock.send(msg)
@@ -372,7 +374,7 @@ class Node:
         :param node: Remote node conn object
         '''
         p = self.predecessor
-        if p is None or not self.ping(p.udp_address) or self.between(node.nodeID,
+        if p is None or not p.is_valid or not self.ping(p.udp_address) or self.between(node.nodeID,
             self.predecessor.nodeID + 1, self.nodeID):
             self.predecessor = node
 
@@ -397,7 +399,9 @@ class Node:
         if not p is None:
             if p == self.conn:
                 return
-            if self.conn == succ or self.between(p.nodeID, self.nodeID, succ.nodeID):
+            if not p.is_valid and succ != self.conn:
+                self._notify_(self.conn, succ)
+            elif p.is_valid and (self.conn == succ or self.between(p.nodeID, self.nodeID, succ.nodeID)):
                 self.successor = p
                 self._notify_(self.conn, p)
 
@@ -436,13 +440,14 @@ class Node:
                 self.FT[1] = self.successors[0]
             else:
                 self.FT[1] = self.conn
-                self.FT[0] = None
+                self.FT[0] = conn()
             self.FTsem.release()
 
             logger.info(f'New successor is {self.successor}')
             return
 
         if len(self.successors) > 0 and len(self.successors) < self.NBits:
+            logger.debug('Adding successor')
             node = self.successors[-1]
             if node is None or not self.ping(node.udp_address):
                 self.succsem.acquire()

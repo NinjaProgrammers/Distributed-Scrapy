@@ -130,7 +130,7 @@ class CacheNode(Node):
     def replicate_daemon(self):
         while True:
             p = self.predecessor
-            if not p is None and len(self.successors) != 0:
+            if p.is_valid and not p is None and len(self.successors) != 0:
                 succ = random.choice(self.successors)
                 arr = [c for c in self.data.values() if self.between(c.hash, p.nodeID + 1, self.nodeID + 1)]
                 if len(arr) > 0:
