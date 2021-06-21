@@ -73,7 +73,7 @@ comunicaciones.
 
 #### cache.py
 
-Incluye una clase `CacheNode` la cual hereda de la clase `Node` de chord. Es decir, la función de los nodos de cache 
+Incluye una clase `CacheNode` la cual hereda de la clase `Node` de chord. Es decir, la función de los nodos de caché 
 es comportarse como una Tabla de Hash distribuido donde los hash a almacenar son las URL que piden los clientes y 
 los datos guardados serían los correspondientes ficheros HTML resultantes de realizar el scrap. 
 Esta clase implementa un método de hash propio, esto se debe a que la función de hash provista por python no es 
@@ -82,9 +82,9 @@ misma url. Utilizando el hash implementado en la clase se garantiza que todos lo
 asignen el mismo hash a una url dada.                    
 Al heredar de los nodos de chord se heredan los cuatro sockets, dos TCP para responder y enviar pedidos de otros nodos 
 y dos UDP para los mensajes de PING/PONG. Este nodo de caché, además de contestar los pedidos que responden los nodos 
-chord atienden también pedidos específicos de cache, estos son:
+chord atienden también pedidos específicos de caché, estos son:
 
-* GET_URL: Se recibe como parámetro la url que se desea conocer si esta almacenada en cache. El nodo es encargado de 
+* GET_URL: Se recibe como parámetro la url que se desea conocer si esta almacenada en caché. El nodo es encargado de 
 preguntar quién es el poseedor del hash de dicha url haciendo un lookup por dicho hash. Una vez encontrado el nodo, 
 que puede ser, en un principio, el mismo al que le hicieron el pedido, debe devolver el html correspondiente en caso de
 estar guardado en la caché, o un mensaje de "Empty" en caso contrario.
@@ -169,7 +169,7 @@ el nodo actual devuelve la información de algún otro nodo de caché existente 
 Dentro de las funciones del broker está manejar los pedidos a la caché, para esto cuenta con dos métodos: 
 
 * get_cache_data: Este se encarga de preguntar a algún nodo de caché disponible por una url en específico y devuelve 
-la respuesta, en caso de que exista la url en cache devueve el html, en caso contrario no devuelve nada. 
+la respuesta, en caso de que exista la url en caché devueve el html, en caso contrario no devuelve nada. 
 
 * save_cache_data: Envía a algún nodo disponible la información de una url a la que se le haya realizado scrap para 
 que sea almacenada por el nodo de caché correspondiente. 
@@ -227,7 +227,9 @@ el nodo iniciará solo, como un servidor independiente.
 
 * ```--httpport``` Puerto por donde se escucharán los pedidos HTTP. Tipo entero, no requerido, por defecto 5001. 
 
-* ```--nbits``` Número de bits del modelo chord. Tipo entero, no requerido, por defecto 5.
+* ```--nbits``` Número de bits del modelo chord. Tipo entero, no requerido, por defecto 5, aunque debería tomar un 
+valor mucho mayor, se deja así para evitar el exceso de información en las salidas en las consolas y por tanto ayudar 
+a la comprobación del correcto funcionamiento del programa.
 
 Ejemplo:              
 ```bash
@@ -236,7 +238,7 @@ python3 HttpServer.py --address 172.17.0.3:5000 --portin 8000 --httpport 10200
 
 Argumentos para ejecutar cache:       
   
-* ```-ns --nameserver``` Dirección del servidor al cual conectar la cache. Tipo string, requerido
+* ```-ns --nameserver``` Dirección del servidor al cual conectar la caché. Tipo string, requerido
 
 Ejemplo:
 ```bash
@@ -259,6 +261,74 @@ caché como se deseen pero debido a la restricción con el puerto UDP solo se po
 
 Se proporciona además un Dockerfile para crear la imagen de docker con las dependencias y el programa listo para ser 
 ejecutado.
+
+
+***
+
+## Ejemplo de ejecución
+
+A continuación describiremos los pasos para probar el programa utilizando docker
+
+* Abrir varios contenedores de docker sobre la imagen proporcionada.
+ 
+* En la consola del primer contenedor, correr el comando **```$ python HttpServer.py```** para inicializar el primer
+servidor HTTP. Se mostrarán en la consola las direcciones por las que el servidor escuchará los pedidos HTTP y TCP.
+
+![](img/HttpServer1.png)
+
+* En la consola del segundo contenedor, correr el comando **```$ python HttpServer.py -a <address>```** donde **address** 
+corresponde a la dirección TCP que mostró el contenedor anterior.
+
+![](img/HttpServer2.png)
+
+* Abra todos los servidores HTTP que desee siguiendo el paso anterior, siempre especificando la dirección TCP de otro 
+servidor HTTP que se encuentre corriendo. Recuerde que de no especificar esa dirección el nuevo servidor correrá de 
+manera independiente.
+
+* Para abrir los nodos de caché es necesario escribir en la consola del contenedor el comando 
+**```$ python cache.py -ns <address>```** donde **address** corresponde a la dirección TCP de algún nodo servidor que 
+se encuentre corriendo actualmente.
+
+![](img/cache1.png)
+ 
+* Puede correr tantos nodos de caché como desee siempre especificando la dirección TCP de un nodo de servidor que se 
+encuentre corriendo actualmente.
+
+* **En un mismo contenedor no puede correr más de un proceso de servidor HTTP debido al uso del puerto 5555 para las 
+comunicaciones UDP**.
+
+* Para obtener el html de la url deseada abra en el navegador de su preferencia una pestaña y escriba la dirección HTTP
+de un nodo de servidor que se encuentre corriendo actualmente, **importante escribir la dirección HTTP y no la TCP**, vea 
+la salida en consola del contenedor para obtener estas direcciones. Verá una página sencilla donde deberá introducir 
+la url, el dominio y la profundidad de la búsqueda deseada. Es obligatorio proporcionar valores para los campos **URL** 
+y **DEPTH**, el campo **DOMAIN** se utiliza para buscar solo los en las urls de las páginas que se encuentren en el
+dominio proporcionado. 
+
+![aaa](img/firefox1.png)
+ 
+* Presione el botón **Submit** y el programa se encargará de obtener de internet, o de la caché en caso de que 
+esté guardada, el html de la url proporcionada. Para saber desde donde se obtuvo la url vea la salida en consola del 
+servidor al cual se conectó a través del navegador.
+
+![](img/HttpServer3.png)
+
+* Verá un cuadro de diálogo en el navegador con las opciones de abrir y ver la url o salvarla. Es importante que, en caso
+de haber enviado a analizar con profundidad mayor que 1, al seleccionar ver la url puede ocurrir que el navegador no sea
+capaz de mostrar todos los html que se obtuvieron, por lo que en este caso se recomienda guardarlas en un archivo local.
+
+* Cierre y abra nuevos nodos en los contenedores para que compruebe la disponibilidad del sistema. Cuando abra los nodos de 
+caché es posible que estos intenten conectarse inicialmente sin éxito a otros nodos de caché que no se encuentren 
+corriendo, es necesario esperar a que el nodo termine este proceso, conectándose a un nodo abierto, para poder correr el 
+siguiente nodo de caché, espere por el mensaje en la consola del contenedor que especifica el sucesor del nodo, o por el 
+mensaje que explica que no existe ningún otro nodo corriendo, para poder correr el siguiente nodo.
+
+![](img/cache2.png)
+
+* Cierre el nodo coordinador de los nodos servidores y espere a que los demás nodos adviertan que el nodo no está 
+disponible para que observe el desarrollo del proceso de elección.
+
+![](img/HttpServer4.png)  
+
 
 
 

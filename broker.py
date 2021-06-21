@@ -60,7 +60,6 @@ class Broker(chordServer.node, FlatServer.Node,ThreadingMixIn):
             if reply is None:
                 c.active = False
                 continue
-            print("REPLY  received ")
             return reply
         return "Empty"
 

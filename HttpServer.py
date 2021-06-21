@@ -4,10 +4,8 @@ from urllib.parse import urlparse, unquote
 import urllib.request
 from html.parser import HTMLParser
 from urllib.request import HTTPError, URLError
-import threading
 from broker import Broker
 from logFormatter import logger
-
 
 class HtmlParser(HTMLParser):
 
@@ -39,7 +37,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
         # f.close()
 
     def __set_get_response(self):
-        self.send_response(200)
+        self.send_response(202)
         self.send_header('Content-type', 'octet-stream')
         self.send_header('Content-Disposition', 'attachment; filename = "response.html"')
         self.end_headers()
@@ -64,12 +62,9 @@ class HTTPHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         query = urlparse(unquote(self.path)).query
         if len(query) > 0:
-
             self.__set_get_response()
             search, depth, domain = self.__parse_query__(query)
             logger.info(f'GET request for url: {search} in domain: {domain} with depth: {depth}')
-            html = self.__get_html_response__(search ,depth ,domain)
-
             s = '<!DOCTYPE html>' \
                 '<html lang="en">' \
                 '<head>' \
@@ -78,17 +73,25 @@ class HTTPHandler(BaseHTTPRequestHandler):
                 '</head>' \
                 '<body>' \
                 '<p>'
-            items = ''
-            for item in html:
-                # print('!!!!!!!!!!!!!', item, '!!!!!!!!!!!!!!!!')
-                items += "<h1 style = 'color: cornflowerblue'>URL: " + str(item) + " </h1> "
-                items += str(html[item])
+            try:
+                self.wfile.write((s).encode('utf-8'))
+            except BrokenPipeError as e:
+                logger.error(f'ERROR {e.errno}: {e.strerror}')
+            for item in self.__get_html_response__(search, depth, domain):
+                items = "<h1 style = 'color: cornflowerblue'>URL: " + str(item) + " </h1> "
+                items += str(item)
+                try:
+                    self.wfile.write((items).encode('utf-8'))
+                except BrokenPipeError as e:
+                    logger.error(f'ERROR {e.errno}: {e.strerror}')
+                    return
             r = '</p>' \
                 '</form>' \
                 '</body>' \
                 '</html>'
             try:
-                self.wfile.write((s + items + r).encode('utf-8'))
+                logger.info("Scrapping finished")
+                self.wfile.write((r).encode('utf-8'))
             except BrokenPipeError as e:
                 logger.error(f'ERROR {e.errno}: {e.strerror}')
         else:
@@ -110,6 +113,7 @@ class HTTPHandler(BaseHTTPRequestHandler):
                 '</body>' \
                 '</html>'
             try:
+                logger.info("Scrapping finished")
                 self.wfile.write(s.encode('utf-8'))
             except BrokenPipeError as e:
                 logger.error(f'ERROR {e.errno}: {e.strerror}')
@@ -124,58 +128,54 @@ class HttpServer(HTTPServer):
         HTTPServer.__init__(self, address, handler)
 
     def get_html(self, url, domain, depth):
-        answer = self.__scrap_urls__(url=url, domain=domain, nivel=depth)
-        return answer
+        return self.__scrap_urls__(url=url, domain=domain, nivel=depth)
 
     def __scrap_urls__(self, url, domain, nivel):
         answer = {}
         parser = HtmlParser()
         parser.urls.append(url)
-        print(f'INITIAL  {parser.urls}, DEPTH {nivel}')
         count = 1
-        print(url, domain, nivel)
         while count <= nivel:
             level = parser.urls.copy()
-            print(f'LEVEL {count}  {parser.urls}')
             for url in level:
                 logger.info(f"Getting html for {url}")
-                print(url)
                 if not (url.startswith("https://") or url.startswith("http://")
                         or url.startswith("file://") or url.startswith("ftp://")):
-                    print("URL ERROR")
                     continue
                 if domain != '' and domain not in url:
                     answer[url] = "DOMAIN ERROR"
+                    logger.debug("URL not in domain")
+                    yield "DOMAIN ERROR"
                     continue
                 html = self.broker.__get_cache_data__(url)
                 if html != "Empty" and not html is None:
                     logger.info("CACHE RETURNED HTML")
                     answer[url] = html
+                    yield html
                     if count < nivel:
                         parser.feed(html)
                 else:
                     try:
                         logger.info("Scrapping internet")
                         with urllib.request.urlopen(url, timeout=15) as r:
-                            # if r.getcode() != 200:
-                            # answer[url] = "GET request returned code " + r.getcode()
-                            #    continue
-                            print("1")
                             x = r.read().decode('utf-8')
-                            print("2")
                         parser.feed(x)
-                        print("3")
                         answer[url] = x
+                        yield x
                         self.broker.__save_cache_data__(url, x)
                     except HTTPError as e:
                         answer[url] = "HTTP ERROR" + str(e.getcode())
+                        yield "HTTP ERROR" + str(e.getcode())
                         logger.error(e.getcode())
                     except URLError as e:
                         answer[url] = "URL ERROR: " + str(e.reason)
+                        yield "URL ERROR: " + str(e.reason)
                         logger.error(e.reason)
+                    except Exception as e:
+                        answer[url] = "ERROR: " + str(e.args)
+                        yield "ERROR: " + str(e.args)
+                        logger.error(e.args)
             count += 1
-        return answer
-
 
 def main():
     import argparse
@@ -189,6 +189,7 @@ def main():
                         help='Port for HTTP server')
     parser.add_argument('--nbits', type=int, default=5, required=False,
                         help='Number of bits of the chord model')
+    # It should have a bigger default value
     args = parser.parse_args()
 
     port1 = args.portin

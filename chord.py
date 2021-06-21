@@ -9,14 +9,12 @@ from logFormatter import logger
 from constants import *
 from conn import conn
 
-THREADS = 5
+THREADS = 30
 REPLY = 1
 RESEND = 2
 
 class Node:
     def __init__(self, dns):
-        self.replication = 5
-
         self.dns = dns
         host = socket.gethostname()
         host = socket.gethostbyname(host)
@@ -26,7 +24,7 @@ class Node:
         self.lsock = self.context.socket(zmq.ROUTER)
         port = self.lsock.bind_to_random_port(f'tcp://{host}')
         self.listen_address = f'tcp://{host}:{port}'
-        logger.info(f'Listening TCP requests at {self.listen_address}')
+        logger.info(f'Listening TCP requests at {host}:{port}')
 
         # Opening zmq inproc sockets
         self.worker_address = f'inproc://workers{port}'
@@ -106,7 +104,7 @@ class Node:
         sock.send(msg)
         reply = None
         retransmits = 0
-        while (flags & REPLY) > 0 and retransmits < 30:
+        while (flags & REPLY) > 0 and retransmits < 10:
             retransmits += 1
             try:
                 if (flags & RESEND) > 0:
@@ -187,8 +185,12 @@ class Node:
         sock.connect(worker_address)
 
         while True:
-            ident1, ident2, data = sock.recv_multipart()
-            data = pickle.loads(data)
+            try:
+                ident1, ident2, data = sock.recv_multipart()
+                data = pickle.loads(data)
+            except Exception as e:
+                continue
+
             response = self.manage_request(data)
             bits = pickle.dumps(response)
             sock.send_multipart([ident1, ident2, bits])

@@ -3,7 +3,7 @@ from conn import conn
 
 class node:
     def __init__(self, nbits=30):
-        if nbits is None: nbits = 5
+        if nbits is None: nbits = 30
         self.NBits = nbits
         self.MAXNodes = 1 << self.NBits
         self.nodes = []
