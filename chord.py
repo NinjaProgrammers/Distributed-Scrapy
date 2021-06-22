@@ -31,7 +31,7 @@ class Node:
         self.wsock = self.context.socket(zmq.DEALER)
         self.wsock.bind(self.worker_address)
         for i in range(THREADS):
-            threading.Thread(target=self.worker, args=(self.worker_address,)).start()
+            threading.Thread(target=self.worker, args=(self.worker_address,), daemon=True).start()
 
         # Opening UDP sockets for PING PONG messages
         self.sping = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -80,10 +80,10 @@ class Node:
 
         # Starting demons
         logger.debug('Starting daemons')
-        threading.Thread(target=self.stabilize_daemon, name='ThreadStabilize').start()
-        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='ThreadDevice').start()
-        threading.Thread(target=self.pong, name='PONG').start()
-        threading.Thread(target=self.successors_daemon, name='ThreadSuccessors').start()
+        threading.Thread(target=self.stabilize_daemon, name='ThreadStabilize', daemon=True).start()
+        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='ThreadDevice', daemon=True).start()
+        threading.Thread(target=self.pong, name='PONG', daemon=True).start()
+        threading.Thread(target=self.successors_daemon, name='ThreadSuccessors', daemon=True).start()
 
     def ssocket_send(self, msg, node: conn, flags: int =0):
         '''

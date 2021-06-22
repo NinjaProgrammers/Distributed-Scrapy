@@ -36,7 +36,7 @@ class Node:
         self.wsock = self.context.socket(zmq.DEALER)
         self.wsock.bind(self.worker_address)
         for i in range(THREADS):
-            threading.Thread(target=self.worker, args=(self.worker_address,), name=f'ThreadWorker-{i}').start()
+            threading.Thread(target=self.worker, args=(self.worker_address,), name=f'ThreadWorker-{i}', daemon=True).start()
 
         # Nodes Info
         self.leaderID = -1
@@ -62,9 +62,9 @@ class Node:
         self.electionID = -1
         self.new_node_queue = []
 
-        threading.Thread(target=self.pong, name='ThreadPONG').start()
-        threading.Thread(target=self.pingingDaemon, name='ThreadPing').start()
-        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='ThreadDevice').start()
+        threading.Thread(target=self.pong, name='ThreadPONG', daemon=True).start()
+        threading.Thread(target=self.pingingDaemon, name='ThreadPing', daemon=True).start()
+        threading.Thread(target=zmq.device, args=(zmq.QUEUE, self.lsock, self.wsock,), name='ThreadDevice', daemon=True).start()
 
 
     @property
@@ -397,8 +397,6 @@ class Node:
         while True:
             seq = [i for i in self.connections if i.nodeID != self.nodeID and i.active]
             if len(self.connections) > 0 and len(seq) == 0:
-                logger.warning(f'[{self.nodeID}]: Node is isolated')
-
                 node = random.choice(self.connections)
                 if node.address != self.listen_address:
                     try:

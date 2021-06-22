@@ -252,7 +252,10 @@ python3 cache.py -ns 172.17.0.3:5000
 **El puerto 5555 está reservado para los sockets UDP. NO DEBE USARSE PARA OTRAS CONEXIONES.**       
 
 El proyecto está diseñado para ser ejecutado en la red por lo que en un mismo host podrán ejecutarse tantos nodos de 
-caché como se deseen pero debido a la restricción con el puerto UDP solo se podrá ejecutar un nodo HttpServer. 
+caché como se deseen pero debido a la restricción con el puerto UDP solo se podrá ejecutar un nodo HttpServer. Se 
+decidió implementarlo de esta manera por las facilidades de implementación que esto proporcionaba y que debido a 
+la función que cumplen los nodos de servidor no es indispensable que existan dos nodos de este tipo corriendo en 
+el mismo host.
 **Dos nodos de servidor no deben coexistir en el mismo host.**
 
 ***
@@ -264,6 +267,14 @@ ejecutado.
 
 
 ***
+
+## Archivo ejecutable
+Se brinda un archivo **example.py** el cual ejecuta un servidor HTTP y 5 nodos de caché. Al ejecutarlo se puede ver en consola
+los logs del servidor HTTP y la salida de los nodos de caché se redirecciona a archivos txt con los nombres cache0,
+cache1, cache2, cache3 y cache4. Para poder insertar las urls debe abrir un navegador en la dirección del servidor HTTP que 
+se imprime en consola.         
+Este archivo se brinda para probar la ejecución del proyecto en un mismo host, ver los resultados de hacer scrap a urls
+a través de Internet y ver los resultados cuando se toman los elementos de la caché.
 
 ## Ejemplo de ejecución
 
