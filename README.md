@@ -276,6 +276,8 @@ se imprime en consola.
 Este archivo se brinda para probar la ejecución del proyecto en un mismo host, ver los resultados de hacer scrap a urls
 a través de Internet y ver los resultados cuando se toman los elementos de la caché.
 
+![](img/example.png)
+
 ## Ejemplo de ejecución
 
 A continuación describiremos los pasos para probar el programa utilizando docker
